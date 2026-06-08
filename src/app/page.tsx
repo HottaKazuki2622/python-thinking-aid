@@ -4,8 +4,10 @@ import { useState, useRef, useEffect } from "react";
 import { 
   Send, Loader2, Target, Type, GitBranch, ListOrdered, Lightbulb, 
   AlertCircle, Code, MessageSquare, CheckCircle2, HelpCircle, 
-  ArrowRight, ChevronRight, Terminal, RefreshCw, Sparkles, ChevronDown, ChevronUp
+  ArrowRight, ChevronRight, Terminal, RefreshCw, Sparkles, ChevronDown, ChevronUp,
+  Settings, X
 } from "lucide-react";
+import { GoogleGenAI } from "@google/genai";
 
 type AnalysisResult = {
   purpose: string;
@@ -30,6 +32,33 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState("");
+
+  // APIキー関連のステート
+  const [apiKey, setApiKey] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [tempApiKey, setTempApiKey] = useState("");
+
+  // 初期ロード時にLocalStorageや環境変数からAPIキーを取得
+  useEffect(() => {
+    const savedKey = localStorage.getItem("gemini_api_key") || "";
+    const envKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
+    const activeKey = savedKey || envKey;
+    setApiKey(activeKey);
+    setTempApiKey(activeKey);
+  }, []);
+
+  const handleSaveApiKey = (key: string) => {
+    localStorage.setItem("gemini_api_key", key);
+    setApiKey(key);
+    setShowSettings(false);
+  };
+
+  const getAiClient = () => {
+    if (!apiKey) {
+      throw new Error("Gemini APIキーが設定されていません。画面右上の設定（ギアアイコン）からAPIキーを入力してください。");
+    }
+    return new GoogleGenAI({ apiKey });
+  };
 
   // 新機能関連のステート
   const [activeTab, setActiveTab] = useState<"editor" | "chat">("editor");
@@ -64,22 +93,41 @@ export default function Home() {
     setCurrentStep(1);
 
     try {
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+      const ai = getAiClient();
+      const systemInstruction = `あなたはPython初学者のための「思考補助AI」です。
+ユーザーからPythonの課題文が与えられます。
+以下の制約を厳守して回答してください。
+
+【絶対の制約】
+1. 完成したPythonコード（答え）は絶対に提示しないこと。
+2. 初学者がつまずかないよう、優しく励ますようなトーンで丁寧に説明すること。
+3. 指定された5つの項目ごとに整理して思考プロセスを出力すること。
+4. 必ずJSON形式で出力し、指定されたキーのみを含むこと。
+
+【出力JSONのキーと内容】
+- "purpose": 問題の目的（何を解決・実現するためのプログラムか）
+- "inputs": 入力値（プログラムに必要なデータ、変数、ユーザーからの入力は何か）
+- "branches": 条件分岐（if文など、どのような場合分けが必要か。不要な場合は「特になし」とする）
+- "steps": 考える手順（コードを書くためのロジックの順番を分かりやすく箇条書きで）
+- "hints": ヒント（使うと便利な組み込み関数や概念、よくある間違いの注意点など）
+`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: {
+          systemInstruction: systemInstruction,
+          responseMimeType: "application/json",
+        }
       });
 
-      if (!res.ok) {
-        let errorMsg = "解析に失敗しました。後でもう一度お試しください。";
-        try {
-          const errData = await res.json();
-          if (errData.error) errorMsg = errData.error;
-        } catch (_) {}
-        throw new Error(errorMsg);
+      const text = response.text;
+      if (!text) {
+        throw new Error("AIから空の応答が返されました");
       }
 
-      const data = await res.json();
+      const cleanedText = text.replace(/```(?:json)?\n?/g, "").replace(/```/g, "").trim();
+      const data = JSON.parse(cleanedText);
       setResult(data);
       // 初期のコードエディタに初期テンプレートを配置
       setUserCode("# ここにコードを書いてみましょう\n\n");
@@ -99,22 +147,50 @@ export default function Home() {
     setReviewResult(null);
 
     try {
-      const res = await fetch("/api/review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, code: userCode }),
+      const ai = getAiClient();
+      const systemInstruction = `あなたはPython初学者のための「思考補助AI」です。
+ユーザーから「Pythonの課題文」と「ユーザーが書いたPythonコード」が与えられます。
+コードを検証し、以下の制約を厳守してレビュー結果をJSON形式で返してください。
+
+【絶対の制約】
+1. 正しい完成コード（答え）は絶対に提示しないこと。
+2. エラーがある場合や要件を満たしていない場合も、直接答えを教えるのではなく、何が間違っているか、どう修正すべきかの「気づきを与えるヒントや問いかけ」を行ってください。
+3. 初学者を優しく励ますトーンで丁寧に説明すること。
+4. 必ずJSON形式で出力し、指定されたキーのみを含むこと。
+
+【出力JSONのキーと内容】
+- "status": 判定結果。以下のいずれかを選択。
+  - "correct": コードが完全に課題の要件を満たしており、エラーもない。
+  - "needs_improvement": 課題の要件は一部満たしている、または動作はするが、論理的な誤りや改善の余地がある。
+  - "error": 構文エラー（SyntaxError）がある、または実行時に致命的なエラーが起きる書き方になっている。
+- "review": ユーザーへのフィードバック内容。現状の評価、良かった点、改善すべき部分への気づきを促すヒント、次のステップへの問いかけを含めてください（マークダウン形式が使用できますが、完成コードは記述しないでください）。
+`;
+
+      const userPrompt = `【課題文】
+${prompt}
+
+【ユーザーのコード】
+\`\`\`python
+${userCode}
+\`\`\`
+`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemInstruction,
+          responseMimeType: "application/json",
+        }
       });
 
-      if (!res.ok) {
-        let errorMsg = "検証に失敗しました。後でもう一度お試しください。";
-        try {
-          const errData = await res.json();
-          if (errData.error) errorMsg = errData.error;
-        } catch (_) {}
-        throw new Error(errorMsg);
+      const text = response.text;
+      if (!text) {
+        throw new Error("AIから空の応答が返されました");
       }
 
-      const data = await res.json();
+      const cleanedText = text.replace(/```(?:json)?\n?/g, "").replace(/```/g, "").trim();
+      const data = JSON.parse(cleanedText);
       setReviewResult(data);
     } catch (err: any) {
       setReviewError(err.message || "レビュー中にエラーが発生しました");
@@ -135,27 +211,58 @@ export default function Home() {
     setChatLoading(true);
 
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          prompt, 
-          history: chatHistory, 
-          message: userMsg 
-        }),
-      });
+      const ai = getAiClient();
+      const systemInstruction = `あなたはPython初学者のための「思考補助AI」です。
+ユーザーは提示された「Pythonの課題文」についてあなたと対話しています。
 
-      if (!res.ok) {
-        let errorMsg = "回答の取得に失敗しました。";
-        try {
-          const errData = await res.json();
-          if (errData.error) errorMsg = errData.error;
-        } catch (_) {}
-        throw new Error(errorMsg);
+【絶対の制約】
+1. 正しい完成コード（答え）は絶対に提示しないこと。
+2. 部分的なコード例（基本的な文法や関数の使い方）を提示することは構いませんが、課題の解答そのものになってはいけません。
+3. ユーザーの質問に対して、直接答えを教えるのではなく、ヒントを与えたり、「〇〇という関数について調べてみてください」「ここではどのような分岐が必要でしょうか？」のように、ユーザー自身が考えるように誘導する問いかけを行ってください。
+4. 初学者に寄り添い、優しく丁寧、かつ前向きに励ますトーンで対話してください。
+`;
+
+      // チャット履歴をGeminiの形式にマッピング
+      const contents = [
+        {
+          role: "user",
+          parts: [{ text: `【課題文】\n${prompt}\n\nこの課題について一緒に考えていきます。サポートをお願いします。` }]
+        },
+        {
+          role: "model",
+          parts: [{ text: "わかりました！答えのコードを直接教えるのではなく、ヒントを出しながら一緒に考えていきましょう。何から始めますか？" }]
+        }
+      ];
+
+      if (chatHistory && Array.isArray(chatHistory)) {
+        chatHistory.forEach((item: any) => {
+          contents.push({
+            role: item.role === "user" ? "user" : "model",
+            parts: [{ text: item.message }]
+          });
+        });
       }
 
-      const data = await res.json();
-      setChatHistory((prev) => [...prev, { role: "model", message: data.reply }]);
+      // 最新のメッセージを追加
+      contents.push({
+        role: "user",
+        parts: [{ text: userMsg }]
+      });
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: contents,
+        config: {
+          systemInstruction: systemInstruction,
+        }
+      });
+
+      const reply = response.text;
+      if (!reply) {
+        throw new Error("AIから空の応答が返されました");
+      }
+
+      setChatHistory((prev) => [...prev, { role: "model", message: reply }]);
     } catch (err: any) {
       setChatError(err.message || "通信エラーが発生しました");
     } finally {
@@ -196,7 +303,16 @@ export default function Home() {
   return (
     <main className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto flex flex-col gap-6">
       {/* ヘッダー */}
-      <header className="text-center space-y-3 py-4 border-b border-surface-border/50">
+      <header className="relative text-center space-y-3 py-4 border-b border-surface-border/50">
+        <div className="absolute right-0 top-0">
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-2 hover:bg-surface-border/40 rounded-full transition-all text-gray-400 hover:text-gray-200 cursor-pointer"
+            title="APIキー設定"
+          >
+            <Settings className="w-5 h-5" />
+          </button>
+        </div>
         <div className="inline-flex items-center gap-2 bg-primary/10 border border-primary/20 px-3 py-1 rounded-full text-xs font-semibold text-primary">
           <Sparkles className="w-3.5 h-3.5" />
           Prototype v2
@@ -209,6 +325,24 @@ export default function Home() {
           答えのコードではなく、自力で解くための「思考の手順」を段階的にガイドし、書いたコードのフィードバックを行います。
         </p>
       </header>
+
+      {/* APIキー未設定時の警告 */}
+      {!apiKey && (
+        <div className="bg-yellow-950/20 border border-yellow-900/50 text-yellow-300 p-4 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-3 max-w-3xl mx-auto w-full">
+          <div className="flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0" />
+            <p className="text-sm">
+              Gemini APIキーが設定されていません。アプリを使用するにはAPIキーの設定が必要です。
+            </p>
+          </div>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-gray-950 text-xs font-bold rounded-lg transition-colors flex-shrink-0 cursor-pointer"
+          >
+            APIキーを設定する
+          </button>
+        </div>
+      )}
 
       {/* 課題入力フォーム */}
       {!result && (
@@ -606,6 +740,68 @@ export default function Home() {
             </div>
           </div>
 
+        </div>
+      )}
+
+      {/* APIキー設定用モーダル */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-surface max-w-md w-full rounded-2xl border border-surface-border p-6 shadow-2xl space-y-4 relative text-left">
+            <button
+              onClick={() => {
+                setTempApiKey(apiKey);
+                setShowSettings(false);
+              }}
+              className="absolute right-4 top-4 text-gray-400 hover:text-gray-200 p-1 hover:bg-surface-border/40 rounded-full transition-all cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            
+            <h3 className="text-lg font-bold text-gray-100 flex items-center gap-2">
+              <Settings className="w-5 h-5 text-primary" />
+              APIキー設定
+            </h3>
+            
+            <p className="text-xs text-gray-400 leading-relaxed">
+              本アプリケーションはブラウザ上で直接 Gemini API を呼び出します。
+              入力されたAPIキーはブラウザのLocalStorageにのみ保存され、サーバー等に送信されることはありません。
+            </p>
+            
+            <div className="space-y-2 text-left">
+              <label htmlFor="modal-api-key" className="text-sm font-medium text-gray-300 block">
+                Gemini API キー (API Key)
+              </label>
+              <input
+                id="modal-api-key"
+                type="password"
+                value={tempApiKey}
+                onChange={(e) => setTempApiKey(e.target.value)}
+                placeholder="AIzaSy..."
+                className="w-full px-3 py-2 bg-gray-950 border border-surface-border rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent outline-none text-sm font-mono text-gray-200"
+              />
+              <p className="text-[10px] text-gray-500">
+                ※無料のAPIキーは <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Google AI Studio</a> から取得できます。
+              </p>
+            </div>
+            
+            <div className="flex gap-2 justify-end pt-2">
+              <button
+                onClick={() => {
+                  setTempApiKey(apiKey);
+                  setShowSettings(false);
+                }}
+                className="px-4 py-2 text-xs font-semibold text-gray-400 hover:text-gray-200 transition-colors cursor-pointer"
+              >
+                キャンセル
+              </button>
+              <button
+                onClick={() => handleSaveApiKey(tempApiKey)}
+                className="px-4 py-2 bg-primary hover:bg-primary-hover text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+              >
+                保存する
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </main>
