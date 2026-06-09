@@ -43,8 +43,18 @@ export function generateHints(problem: string): HintSet {
     };
   }
 
-  // ── 素数判定 ──────────────────────────────────────────────────────────────
-  if (c.prime) {
+  // ── 素数の一覧表示（入力なし）────────────────────────────────────────────
+  if (c.prime && !c.input) {
+    const r = extractRange(problem) ?? [2, 100];
+    return {
+      hint1: `2 から ${r[1]} まで1つずつ調べて、素数だけ出力します。素数とは「1と自分自身以外では割り切れない2以上の整数」です。外側ループで候補を選び、内側ループで割り切れるか確かめる2重ループが基本です。`,
+      hint2: `外側: \`for n in range(2, ${r[1] + 1}):\` で候補を列挙。内側: \`for i in range(2, n):\` で \`n % i == 0\` なら素数でないと確定。フラグ変数 \`is_prime = True\` を内側ループ前に置き、割り切れたら \`False\` にして \`break\`。`,
+      hint3: `骨格：\n\`\`\`python\nfor n in range(2, ${r[1] + 1}):\n    is_prime = True\n    for i in range(2, n):   # 2〜n-1で割り切れるか試す\n        if n % i == 0:\n            is_prime = False\n            break\n    if is_prime:\n        print(n)\n\`\`\`\n動きますが遅いです。\`range(2, int(n**0.5) + 1)\` にすると高速化できます（なぜか考えてみましょう）。`,
+    };
+  }
+
+  // ── 素数判定（入力あり）──────────────────────────────────────────────────
+  if (c.prime && c.input) {
     return {
       hint1: "ある数 n が素数かどうかを判定するには「2以上 n-1 以下の数で割り切れるか」を調べます。一つでも割り切れれば素数ではありません。",
       hint2: "`for i in range(2, n):` でループし、`if n % i == 0:` で割り切れるか確認します。フラグ変数（例: `is_prime = True`）を用意して、割り切れたら `False` にします。",

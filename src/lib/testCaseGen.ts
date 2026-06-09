@@ -13,6 +13,17 @@ function tc(label: string, input: string, expected: string): TestCase {
   return { id: uid(), label, input, expected };
 }
 
+function sievePrimes(max: number): number[] {
+  const sieve = new Uint8Array(max + 1).fill(1);
+  sieve[0] = sieve[1] = 0;
+  for (let i = 2; i * i <= max; i++) {
+    if (sieve[i]) for (let j = i * i; j <= max; j += i) sieve[j] = 0;
+  }
+  const primes: number[] = [];
+  for (let i = 2; i <= max; i++) if (sieve[i]) primes.push(i);
+  return primes;
+}
+
 function detect(text: string) {
   return {
     hasInput:   /入力|input\b|ユーザーから|キーボード|読み込|stdin/.test(text),
@@ -139,6 +150,13 @@ export function generateTestCases(problem: string): TestCase[] {
       tc("テスト1", "3\n1\n4\n1\n5", "1"),
       tc("テスト2", "10\n2\n8", "2"),
     ];
+  }
+
+  // ── 素数の一覧表示（入力なし）────────────────────────────────────────────
+  if (c.isPrime && !c.hasInput) {
+    const range = extractRange(problem) ?? [1, 100];
+    const primes = sievePrimes(range[1]);
+    return [tc(`${range[0]}〜${range[1]}の素数（${primes.length}個）`, "", primes.join("\n"))];
   }
 
   // ── 素数判定（入力あり）──────────────────────────────────────────────────

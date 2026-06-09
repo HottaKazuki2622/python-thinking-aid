@@ -129,6 +129,40 @@ export default function Home() {
     if (level > maxUnlocked) setMaxUnlocked(level as 0 | 1 | 2 | 3);
   };
 
+  // Auto-indent: Tab → 4 spaces, Enter → keep indent (+4 after colon)
+  const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget;
+    const { value, selectionStart, selectionEnd } = ta;
+
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const indent = e.shiftKey
+        ? ""  // Shift+Tab: could remove indent — skip for now
+        : "    ";
+      const next = value.slice(0, selectionStart) + indent + value.slice(selectionEnd);
+      setCode(next);
+      requestAnimationFrame(() => {
+        ta.selectionStart = ta.selectionEnd = selectionStart + indent.length;
+      });
+      return;
+    }
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+      const currentLine = value.slice(lineStart, selectionStart);
+      const currentIndent = currentLine.match(/^(\s*)/)?.[1] ?? "";
+      const extraIndent = currentLine.trimEnd().endsWith(":") ? "    " : "";
+      const insertion = "\n" + currentIndent + extraIndent;
+      const next = value.slice(0, selectionStart) + insertion + value.slice(selectionEnd);
+      setCode(next);
+      const newPos = selectionStart + insertion.length;
+      requestAnimationFrame(() => {
+        ta.selectionStart = ta.selectionEnd = newPos;
+      });
+    }
+  };
+
   // ── Derived ────────────────────────────────────────────────────────────────
 
   const passCount = testResults?.filter((r) => r.status === "pass").length ?? 0;
@@ -310,6 +344,7 @@ export default function Home() {
                 <textarea
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
+                  onKeyDown={handleEditorKeyDown}
                   placeholder="# ここにPythonコードを入力してください"
                   className="flex-1 p-4 bg-transparent outline-none resize-none text-gray-200 placeholder-gray-600 font-mono text-sm leading-[1.625rem]"
                   spellCheck={false}
@@ -460,12 +495,20 @@ function TestCaseCard({ index, testCase, result, onChange, onDelete }: TestCaseC
           />
         </div>
         <div className="p-2">
-          <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">期待する出力</div>
+          <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">
+            期待する出力
+            {testCase.expected.split("\n").length > 10 && (
+              <span className="ml-1 text-gray-600 font-normal">
+                ({testCase.expected.split("\n").length}行)
+              </span>
+            )}
+          </div>
           <textarea
             value={testCase.expected}
             onChange={(e) => onChange("expected", e.target.value)}
-            className="w-full text-xs bg-gray-950/60 text-gray-300 rounded p-1.5 outline-none resize-none font-mono border border-surface-border/30 focus:border-primary/50 placeholder-gray-700"
+            className="w-full text-xs bg-gray-950/60 text-gray-300 rounded p-1.5 outline-none resize-y font-mono border border-surface-border/30 focus:border-primary/50 placeholder-gray-700"
             rows={3}
+            style={{ maxHeight: "120px" }}
             placeholder="（未設定）"
           />
         </div>
