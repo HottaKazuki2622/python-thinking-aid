@@ -5,7 +5,7 @@ import {
   Send, Loader2, Terminal, RefreshCw, Sparkles,
   ChevronDown, ChevronUp, Plus, Trash2, Play,
   CheckCircle2, XCircle, AlertCircle, Lock,
-  Wifi, WifiOff,
+  Wifi, WifiOff, Clipboard,
 } from "lucide-react";
 import { generateTestCases } from "@/lib/testCaseGen";
 import type { TestCase } from "@/lib/testCaseGen";
@@ -20,9 +20,27 @@ type TestResult = {
   status: "pass" | "fail" | "error" | "no_expected";
   actual: string;
   error?: string;
+  time?: number;
+};
+
+type TermOutput = {
+  stdout: string;
+  stderr: string;
+  error?: string;
+  time: number;
 };
 
 type PyStatus = "idle" | "loading" | "ready" | "error";
+
+// Auto-close bracket pairs
+const OPEN_PAIRS: Record<string, string> = {
+  "(": ")",
+  "[": "]",
+  "{": "}",
+  '"': '"',
+  "'": "'",
+};
+const CLOSE_BRACKETS = new Set([")", "]", "}"]);
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -37,11 +55,11 @@ export default function Home() {
   const [code, setCode] = useState("# ここにコードを書いてみましょう\n\n");
   const [running, setRunning] = useState(false);
   const [testResults, setTestResults] = useState<TestResult[] | null>(null);
+  const [termOutput, setTermOutput] = useState<TermOutput | null>(null);
 
   const [pyStatus, setPyStatus] = useState<PyStatus>("idle");
   const [pyMsg, setPyMsg] = useState("");
 
-  // Hint unlock: level 1 always available, 2 unlocked after 1 opened, 3 after 2
   const [openHint, setOpenHint] = useState<1 | 2 | 3 | null>(null);
   const [maxUnlocked, setMaxUnlocked] = useState<0 | 1 | 2 | 3>(0);
 
@@ -64,6 +82,7 @@ export default function Home() {
     setHints(generateHints(problem));
     setCode("# ここにコードを書いてみましょう\n\n");
     setTestResults(null);
+    setTermOutput(null);
     setOpenHint(null);
     setMaxUnlocked(0);
     setStarted(true);
@@ -76,8 +95,29 @@ export default function Home() {
     setStarted(false);
     setProblem("");
     setTestResults(null);
+    setTermOutput(null);
   };
 
+  // Run code without tests — shows raw terminal output
+  const handleRunCode = async () => {
+    if (!code.trim() || running || pyStatus !== "ready") return;
+    setRunning(true);
+    setTermOutput(null);
+
+    const start = performance.now();
+    const res = await runPython(code, "");
+    const elapsed = (performance.now() - start) / 1000;
+
+    setTermOutput({
+      stdout: res.stdout,
+      stderr: res.stderr,
+      error: res.error,
+      time: elapsed,
+    });
+    setRunning(false);
+  };
+
+  // Run all test cases and compare to expected output
   const handleRunTests = async () => {
     if (!code.trim() || running || pyStatus !== "ready") return;
     setRunning(true);
@@ -85,7 +125,9 @@ export default function Home() {
 
     const results: TestResult[] = [];
     for (const tc of testCases) {
+      const start = performance.now();
       const res = await runPython(code, tc.input);
+      const elapsed = (performance.now() - start) / 1000;
       const actual = res.stdout.replace(/\r\n/g, "\n").trim();
       const expected = tc.expected.replace(/\r\n/g, "\n").trim();
 
@@ -97,7 +139,7 @@ export default function Home() {
       } else {
         status = actual === expected ? "pass" : "fail";
       }
-      results.push({ id: tc.id, status, actual, error: res.error });
+      results.push({ id: tc.id, status, actual, error: res.error, time: elapsed });
     }
 
     setTestResults(results);
@@ -106,7 +148,15 @@ export default function Home() {
 
   const updateTestCase = (id: string, field: keyof TestCase, value: string) => {
     setTestCases((prev) => prev.map((tc) => (tc.id === id ? { ...tc, [field]: value } : tc)));
-    setTestResults(null); // clear stale results when test cases change
+    setTestResults(null);
+  };
+
+  // Set actual run output as expected value for a test case
+  const handleSetExpected = (id: string, actual: string) => {
+    setTestCases((prev) =>
+      prev.map((tc) => (tc.id === id ? { ...tc, expected: actual } : tc))
+    );
+    setTestResults(null);
   };
 
   const deleteTestCase = (id: string) => {
@@ -129,24 +179,124 @@ export default function Home() {
     if (level > maxUnlocked) setMaxUnlocked(level as 0 | 1 | 2 | 3);
   };
 
-  // Auto-indent: Tab → 4 spaces, Enter → keep indent (+4 after colon)
+  // ── Editor keyboard handler ─────────────────────────────────────────────────
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const ta = e.currentTarget;
     const { value, selectionStart, selectionEnd } = ta;
 
-    if (e.key === "Tab") {
+    // ── Auto-close pairs: (, [, {, ", ' ─────────────────────────────────────
+    if (e.key in OPEN_PAIRS && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const closer = OPEN_PAIRS[e.key];
+      const isQuote = e.key === '"' || e.key === "'";
+
+      if (selectionStart === selectionEnd) {
+        const prevChar = value[selectionStart - 1];
+        const nextChar = value[selectionStart];
+
+        // Don't auto-close if prev char is same quote (typing second " in """)
+        if (isQuote && prevChar === e.key) {
+          return;
+        }
+        // If next char is already the same quote, just move cursor past it
+        if (isQuote && nextChar === closer) {
+          e.preventDefault();
+          requestAnimationFrame(() => {
+            ta.selectionStart = ta.selectionEnd = selectionStart + 1;
+          });
+          return;
+        }
+
+        e.preventDefault();
+        const next =
+          value.slice(0, selectionStart) + e.key + closer + value.slice(selectionEnd);
+        setCode(next);
+        requestAnimationFrame(() => {
+          ta.selectionStart = ta.selectionEnd = selectionStart + 1;
+        });
+        return;
+      }
+    }
+
+    // ── Skip over closing bracket if it already exists ─────────────────────
+    if (
+      CLOSE_BRACKETS.has(e.key) &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      selectionStart === selectionEnd &&
+      value[selectionStart] === e.key
+    ) {
       e.preventDefault();
-      const indent = e.shiftKey
-        ? ""  // Shift+Tab: could remove indent — skip for now
-        : "    ";
-      const next = value.slice(0, selectionStart) + indent + value.slice(selectionEnd);
-      setCode(next);
       requestAnimationFrame(() => {
-        ta.selectionStart = ta.selectionEnd = selectionStart + indent.length;
+        ta.selectionStart = ta.selectionEnd = selectionStart + 1;
       });
       return;
     }
 
+    // ── Tab / Shift+Tab ──────────────────────────────────────────────────────
+    if (e.key === "Tab") {
+      e.preventDefault();
+      if (e.shiftKey) {
+        // Remove up to 4 leading spaces from the current line
+        const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+        const lineContent = value.slice(lineStart, selectionStart);
+        const leadingSpaces = lineContent.match(/^ {1,4}/)?.[0] ?? "";
+        if (leadingSpaces) {
+          const next =
+            value.slice(0, lineStart) + value.slice(lineStart + leadingSpaces.length);
+          setCode(next);
+          requestAnimationFrame(() => {
+            ta.selectionStart = ta.selectionEnd = Math.max(
+              lineStart,
+              selectionStart - leadingSpaces.length
+            );
+          });
+        }
+      } else {
+        const next =
+          value.slice(0, selectionStart) + "    " + value.slice(selectionEnd);
+        setCode(next);
+        requestAnimationFrame(() => {
+          ta.selectionStart = ta.selectionEnd = selectionStart + 4;
+        });
+      }
+      return;
+    }
+
+    // ── Backspace: remove full indent block or paired brackets ────────────────
+    if (e.key === "Backspace" && selectionStart === selectionEnd && !e.ctrlKey && !e.metaKey) {
+      const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+      const beforeCursor = value.slice(lineStart, selectionStart);
+
+      // Remove spaces in tab-width multiples
+      if (/^ +$/.test(beforeCursor) && beforeCursor.length > 0) {
+        e.preventDefault();
+        const removeCount =
+          beforeCursor.length % 4 === 0 ? 4 : beforeCursor.length % 4;
+        const next =
+          value.slice(0, selectionStart - removeCount) + value.slice(selectionStart);
+        setCode(next);
+        requestAnimationFrame(() => {
+          ta.selectionStart = ta.selectionEnd = selectionStart - removeCount;
+        });
+        return;
+      }
+
+      // Delete paired bracket/quote when deleting the opening character
+      const prevChar = value[selectionStart - 1];
+      const nextChar = value[selectionStart];
+      if (prevChar && nextChar && OPEN_PAIRS[prevChar] === nextChar) {
+        e.preventDefault();
+        const next =
+          value.slice(0, selectionStart - 1) + value.slice(selectionStart + 1);
+        setCode(next);
+        requestAnimationFrame(() => {
+          ta.selectionStart = ta.selectionEnd = selectionStart - 1;
+        });
+        return;
+      }
+    }
+
+    // ── Enter: auto-indent (+ extra indent after colon) ───────────────────────
     if (e.key === "Enter") {
       e.preventDefault();
       const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
@@ -168,6 +318,7 @@ export default function Home() {
   const passCount = testResults?.filter((r) => r.status === "pass").length ?? 0;
   const judgedCount = testResults?.filter((r) => r.status !== "no_expected").length ?? 0;
   const allPass = judgedCount > 0 && passCount === judgedCount;
+  const hasUnsetExpected = testCases.some((tc) => !tc.expected);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -259,6 +410,14 @@ export default function Home() {
                 </button>
               </div>
 
+              {/* Guide for unset expected values */}
+              {hasUnsetExpected && (
+                <div className="mx-4 mt-3 p-3 bg-yellow-900/20 border border-yellow-700/40 rounded-lg text-xs text-yellow-300 leading-relaxed">
+                  <span className="font-semibold">期待値が未設定のテストケースがあります。</span><br />
+                  手順: ①コードを書く → ②「実行」で出力を確認 → ③「テストを実行」→ ④「期待値として設定」ボタンで登録 → ⑤再度テスト実行
+                </div>
+              )}
+
               <div className="flex flex-col gap-3 p-4">
                 {testCases.length === 0 && (
                   <p className="text-xs text-gray-500 text-center py-4">
@@ -324,19 +483,25 @@ export default function Home() {
 
             {/* Code editor */}
             <div className="bg-surface rounded-2xl border border-surface-border overflow-hidden shadow-xl flex flex-col">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border bg-gray-900/40">
-                <div className="flex items-center gap-2 text-xs text-gray-400">
-                  <Terminal className="w-3.5 h-3.5" />
-                  Python エディタ
+
+              {/* Editor tab bar — IDE style */}
+              <div className="flex items-center gap-0 border-b border-surface-border bg-gray-900/70">
+                <div className="flex items-center gap-1.5 px-3 py-2.5">
+                  <div className="w-3 h-3 rounded-full bg-red-500/70" />
+                  <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+                  <div className="w-3 h-3 rounded-full bg-green-500/70" />
                 </div>
-                <span className="text-[10px] text-gray-500 font-mono bg-gray-950 px-2 py-0.5 rounded border border-surface-border">
-                  python3
-                </span>
+                <div className="flex items-center gap-1.5 px-3 py-2 bg-gray-950/60 border-r border-l border-surface-border/60 text-xs text-gray-300 font-mono">
+                  <Terminal className="w-3 h-3 text-blue-400" />
+                  main.py
+                </div>
+                <div className="flex-1" />
+                <span className="px-3 text-[10px] font-mono text-gray-600">Python 3.11 (Pyodide)</span>
               </div>
 
-              {/* Editor body */}
-              <div className="relative bg-gray-950 flex font-mono text-sm" style={{ minHeight: "280px" }}>
-                <div className="bg-gray-900/50 text-gray-600 px-3 py-4 text-right select-none border-r border-surface-border/40 text-xs flex flex-col min-w-[2.5rem]">
+              {/* Editor body with line numbers */}
+              <div className="relative bg-gray-950 flex font-mono text-sm" style={{ minHeight: "300px" }}>
+                <div className="bg-gray-900/20 text-gray-700 px-3 py-4 text-right select-none border-r border-surface-border/20 text-xs flex flex-col min-w-[2.5rem]">
                   {Array.from({ length: Math.max(14, code.split("\n").length) }).map((_, i) => (
                     <div key={i} className="leading-[1.625rem]">{i + 1}</div>
                   ))}
@@ -348,26 +513,104 @@ export default function Home() {
                   placeholder="# ここにPythonコードを入力してください"
                   className="flex-1 p-4 bg-transparent outline-none resize-none text-gray-200 placeholder-gray-600 font-mono text-sm leading-[1.625rem]"
                   spellCheck={false}
-                  style={{ minHeight: "280px" }}
+                  style={{ minHeight: "300px" }}
                 />
               </div>
 
               {/* Run bar */}
-              <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-surface-border/60 bg-gray-900/20">
+              <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-surface-border/50 bg-gray-900/40">
                 <PyodideStatusBadge status={pyStatus} msg={pyMsg} />
-                <button
-                  onClick={handleRunTests}
-                  disabled={running || pyStatus !== "ready" || testCases.length === 0}
-                  className="flex items-center gap-2 px-5 py-2.5 bg-green-700 hover:bg-green-600 disabled:bg-green-950/50 disabled:text-green-900 text-white font-semibold rounded-xl text-sm transition-all shadow hover:-translate-y-0.5 disabled:translate-y-0 disabled:cursor-not-allowed"
-                >
-                  {running ? (
-                    <><Loader2 className="w-4 h-4 animate-spin" />実行中...</>
-                  ) : (
-                    <><Play className="w-4 h-4" />テストを実行</>
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  {/* Run code — terminal output */}
+                  <button
+                    onClick={handleRunCode}
+                    disabled={running || pyStatus !== "ready"}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-900/50 disabled:text-gray-700 text-white font-medium rounded-lg text-sm transition-all disabled:cursor-not-allowed"
+                  >
+                    {running ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5 fill-green-400 text-green-400" />
+                    )}
+                    実行
+                  </button>
+                  {/* Run test cases */}
+                  <button
+                    onClick={handleRunTests}
+                    disabled={running || pyStatus !== "ready" || testCases.length === 0}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-indigo-700 hover:bg-indigo-600 disabled:bg-indigo-950/50 disabled:text-indigo-900 text-white font-semibold rounded-lg text-sm transition-all hover:-translate-y-0.5 disabled:translate-y-0 disabled:cursor-not-allowed"
+                  >
+                    {running ? (
+                      <><Loader2 className="w-3.5 h-3.5 animate-spin" />実行中...</>
+                    ) : (
+                      <><CheckCircle2 className="w-3.5 h-3.5" />テストを実行</>
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
+
+            {/* Terminal output panel */}
+            {termOutput && (
+              <div className="bg-gray-950 rounded-2xl border border-gray-800 overflow-hidden shadow-xl animate-in fade-in slide-in-from-bottom-2 duration-300">
+                {/* Terminal header */}
+                <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-black/40">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-3 h-3 rounded-full bg-red-500/60" />
+                    <div className="w-3 h-3 rounded-full bg-yellow-500/60" />
+                    <div className="w-3 h-3 rounded-full bg-green-500/60" />
+                  </div>
+                  <Terminal className="w-3.5 h-3.5 text-gray-500 ml-2" />
+                  <span className="text-xs text-gray-400">ターミナル</span>
+                  <div className="flex-1" />
+                  <span className={`text-[10px] font-mono ${termOutput.error ? "text-red-500" : "text-green-600"}`}>
+                    {termOutput.error ? "exit 1" : "exit 0"}
+                  </span>
+                </div>
+
+                {/* Terminal body */}
+                <div className="p-4 font-mono text-sm">
+                  {/* Shell prompt + command */}
+                  <div className="text-xs mb-2 flex items-center gap-1">
+                    <span className="text-green-500">student</span>
+                    <span className="text-gray-500">@python</span>
+                    <span className="text-gray-600">:</span>
+                    <span className="text-blue-400">~/workspace</span>
+                    <span className="text-gray-500">$</span>
+                    <span className="text-white ml-1">python3 main.py</span>
+                  </div>
+                  <div className="border-t border-gray-800 mb-3" />
+
+                  {/* stdout */}
+                  {termOutput.stdout && (
+                    <pre className="text-gray-100 whitespace-pre-wrap text-xs leading-relaxed">
+                      {termOutput.stdout}
+                    </pre>
+                  )}
+
+                  {/* Error output */}
+                  {termOutput.error && (
+                    <pre className="text-red-400 whitespace-pre-wrap text-xs leading-relaxed mt-1">
+                      {termOutput.error}
+                    </pre>
+                  )}
+
+                  {!termOutput.stdout && !termOutput.error && (
+                    <span className="text-gray-600 text-xs italic">（出力なし）</span>
+                  )}
+
+                  {/* Execution time footer */}
+                  <div className="border-t border-gray-800 mt-3 pt-2 flex items-center justify-between">
+                    <span className="text-[10px] text-gray-600">
+                      {termOutput.error ? "エラーで終了" : "正常終了"}
+                    </span>
+                    <span className="text-[10px] text-gray-700 font-mono">
+                      {termOutput.time.toFixed(3)}s
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Test results */}
             {testResults && (
@@ -388,12 +631,23 @@ export default function Home() {
                   {testResults.map((result) => {
                     const tc = testCases.find((t) => t.id === result.id);
                     if (!tc) return null;
-                    return <ResultRow key={result.id} testCase={tc} result={result} />;
+                    return (
+                      <ResultRow
+                        key={result.id}
+                        testCase={tc}
+                        result={result}
+                        onSetExpected={
+                          result.status === "no_expected" && result.actual
+                            ? () => handleSetExpected(result.id, result.actual)
+                            : undefined
+                        }
+                      />
+                    );
                   })}
                 </div>
                 {allPass && (
                   <div className="px-5 py-4 bg-green-950/20 border-t border-green-800/40 text-green-200 text-sm">
-                    🎉 すべてのテストに合格しました！実際にPythonで動かして確認してみましょう。
+                    🎉 すべてのテストに合格しました！
                   </div>
                 )}
               </div>
@@ -407,14 +661,13 @@ export default function Home() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-// Pyodide status indicator
 function PyodideStatusBadge({ status, msg }: { status: PyStatus; msg: string }) {
   if (status === "idle") return null;
   if (status === "ready") {
     return (
       <div className="flex items-center gap-1.5 text-xs text-green-400">
         <Wifi className="w-3.5 h-3.5" />
-        <span>Python実行環境 準備完了</span>
+        <span>Python 実行環境 準備完了</span>
       </div>
     );
   }
@@ -434,7 +687,6 @@ function PyodideStatusBadge({ status, msg }: { status: PyStatus; msg: string }) 
   );
 }
 
-// Single test case editor card
 interface TestCaseCardProps {
   index: number;
   testCase: TestCase;
@@ -464,7 +716,6 @@ function TestCaseCard({ index, testCase, result, onChange, onDelete }: TestCaseC
         ? "border-orange-800/60"
         : "border-surface-border/60"
     }`}>
-      {/* Card header */}
       <div className="flex items-center gap-2 px-3 py-2 bg-gray-900/40 border-b border-surface-border/40">
         {statusIcon}
         <input
@@ -474,15 +725,11 @@ function TestCaseCard({ index, testCase, result, onChange, onDelete }: TestCaseC
           className="flex-1 bg-transparent text-xs font-semibold text-gray-300 outline-none placeholder-gray-600"
           placeholder={`テスト${index + 1}`}
         />
-        <button
-          onClick={onDelete}
-          className="text-gray-600 hover:text-red-400 transition-colors p-0.5"
-        >
+        <button onClick={onDelete} className="text-gray-600 hover:text-red-400 transition-colors p-0.5">
           <Trash2 className="w-3.5 h-3.5" />
         </button>
       </div>
 
-      {/* Input / Expected fields */}
       <div className="grid grid-cols-2 divide-x divide-surface-border/40">
         <div className="p-2">
           <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">入力 (stdin)</div>
@@ -495,12 +742,15 @@ function TestCaseCard({ index, testCase, result, onChange, onDelete }: TestCaseC
           />
         </div>
         <div className="p-2">
-          <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">
+          <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1 flex items-center gap-1">
             期待する出力
-            {testCase.expected.split("\n").length > 10 && (
-              <span className="ml-1 text-gray-600 font-normal">
+            {testCase.expected.split("\n").filter(Boolean).length > 10 && (
+              <span className="text-gray-600 font-normal">
                 ({testCase.expected.split("\n").length}行)
               </span>
+            )}
+            {!testCase.expected && (
+              <span className="text-yellow-700 font-normal normal-case">未設定</span>
             )}
           </div>
           <textarea
@@ -509,7 +759,7 @@ function TestCaseCard({ index, testCase, result, onChange, onDelete }: TestCaseC
             className="w-full text-xs bg-gray-950/60 text-gray-300 rounded p-1.5 outline-none resize-y font-mono border border-surface-border/30 focus:border-primary/50 placeholder-gray-700"
             rows={3}
             style={{ maxHeight: "120px" }}
-            placeholder="（未設定）"
+            placeholder="実行後に「期待値として設定」で登録"
           />
         </div>
       </div>
@@ -517,13 +767,13 @@ function TestCaseCard({ index, testCase, result, onChange, onDelete }: TestCaseC
   );
 }
 
-// Result row in the results panel
 interface ResultRowProps {
   testCase: TestCase;
   result: TestResult;
+  onSetExpected?: () => void;
 }
 
-function ResultRow({ testCase, result }: ResultRowProps) {
+function ResultRow({ testCase, result, onSetExpected }: ResultRowProps) {
   const [expanded, setExpanded] = useState(result.status !== "pass");
 
   const bgClass =
@@ -547,8 +797,7 @@ function ResultRow({ testCase, result }: ResultRowProps) {
     );
 
   return (
-    <div className={`${bgClass}`}>
-      {/* Row header */}
+    <div className={bgClass}>
       <button
         onClick={() => setExpanded((v) => !v)}
         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-white/5 transition-colors"
@@ -563,6 +812,9 @@ function ResultRow({ testCase, result }: ResultRowProps) {
           <div className="w-4 h-4 rounded-full border-2 border-gray-600 flex-shrink-0" />
         )}
         <span className="text-sm font-medium text-gray-200 flex-1">{testCase.label}</span>
+        {result.time !== undefined && (
+          <span className="text-[10px] text-gray-600 font-mono">{result.time.toFixed(2)}s</span>
+        )}
         {badge}
         {expanded ? (
           <ChevronUp className="w-3.5 h-3.5 text-gray-500" />
@@ -571,50 +823,61 @@ function ResultRow({ testCase, result }: ResultRowProps) {
         )}
       </button>
 
-      {/* Expanded detail */}
       {expanded && (
-        <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-3 gap-3 animate-in fade-in duration-150">
-          {testCase.input && (
+        <div className="px-4 pb-4 flex flex-col gap-3 animate-in fade-in duration-150">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {testCase.input && (
+              <div>
+                <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">入力</div>
+                <pre className="text-xs font-mono bg-gray-950/60 rounded p-2 text-gray-300 whitespace-pre-wrap border border-surface-border/30">
+                  {testCase.input}
+                </pre>
+              </div>
+            )}
+            {testCase.expected && (
+              <div>
+                <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">期待する出力</div>
+                <pre className="text-xs font-mono bg-gray-950/60 rounded p-2 text-gray-300 whitespace-pre-wrap border border-surface-border/30">
+                  {testCase.expected}
+                </pre>
+              </div>
+            )}
             <div>
-              <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">入力</div>
-              <pre className="text-xs font-mono bg-gray-950/60 rounded p-2 text-gray-300 whitespace-pre-wrap border border-surface-border/30">
-                {testCase.input}
+              <div className={`text-[10px] font-semibold uppercase mb-1 ${
+                result.status === "error" ? "text-orange-500" : "text-gray-500"
+              }`}>
+                {result.status === "error" ? "エラー" : "実際の出力"}
+              </div>
+              <pre className={`text-xs font-mono rounded p-2 whitespace-pre-wrap border ${
+                result.status === "pass"
+                  ? "bg-green-950/20 text-green-200 border-green-800/40"
+                  : result.status === "fail"
+                  ? "bg-red-950/20 text-red-200 border-red-800/40"
+                  : result.status === "error"
+                  ? "bg-orange-950/20 text-orange-200 border-orange-800/40"
+                  : "bg-gray-950/60 text-gray-300 border-surface-border/30"
+              }`}>
+                {result.error ?? (result.actual || "（出力なし）")}
               </pre>
             </div>
-          )}
-          {testCase.expected && (
-            <div>
-              <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">期待する出力</div>
-              <pre className="text-xs font-mono bg-gray-950/60 rounded p-2 text-gray-300 whitespace-pre-wrap border border-surface-border/30">
-                {testCase.expected}
-              </pre>
-            </div>
-          )}
-          <div>
-            <div className={`text-[10px] font-semibold uppercase mb-1 ${
-              result.status === "error" ? "text-orange-500" : "text-gray-500"
-            }`}>
-              {result.status === "error" ? "エラー" : "実際の出力"}
-            </div>
-            <pre className={`text-xs font-mono rounded p-2 whitespace-pre-wrap border ${
-              result.status === "pass"
-                ? "bg-green-950/20 text-green-200 border-green-800/40"
-                : result.status === "fail"
-                ? "bg-red-950/20 text-red-200 border-red-800/40"
-                : result.status === "error"
-                ? "bg-orange-950/20 text-orange-200 border-orange-800/40"
-                : "bg-gray-950/60 text-gray-300 border-surface-border/30"
-            }`}>
-              {result.error ?? (result.actual || "（出力なし）")}
-            </pre>
           </div>
+
+          {/* Set as expected — for no_expected rows with actual output */}
+          {onSetExpected && result.actual && (
+            <button
+              onClick={onSetExpected}
+              className="self-start flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-200 bg-indigo-900/20 hover:bg-indigo-900/40 border border-indigo-700/40 px-3 py-1.5 rounded-lg transition-all"
+            >
+              <Clipboard className="w-3.5 h-3.5" />
+              この出力を期待値として設定する
+            </button>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-// Progressive hint card
 interface HintCardProps {
   level: 1 | 2 | 3;
   title: string;
@@ -668,7 +931,6 @@ function HintCard({ level, title, content, isOpen, isLocked, onClick }: HintCard
   );
 }
 
-// Render hint content with inline code and code blocks
 function HintContent({ text }: { text: string }) {
   const lines = text.split("\n");
   const elements: React.ReactNode[] = [];
@@ -677,7 +939,6 @@ function HintContent({ text }: { text: string }) {
   while (i < lines.length) {
     const line = lines[i];
 
-    // Code block
     if (line.trimStart().startsWith("```")) {
       const codeLines: string[] = [];
       i++;
