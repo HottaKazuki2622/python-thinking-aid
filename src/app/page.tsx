@@ -1,534 +1,368 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect } from "react";
 import {
-  Send, Loader2, Target, Type, GitBranch, ListOrdered, Lightbulb,
-  AlertCircle, Code, MessageSquare, CheckCircle2,
-  ArrowRight, Terminal, RefreshCw, Sparkles, ChevronDown, ChevronUp,
+  Send, Loader2, Terminal, RefreshCw, Sparkles,
+  ChevronDown, ChevronUp, Plus, Trash2, Play,
+  CheckCircle2, XCircle, AlertCircle, Lock,
+  Wifi, WifiOff,
 } from "lucide-react";
-import { analyzeLocalProblem, reviewLocalCode, chatLocalResponse } from "@/lib/localAI";
-import type { AnalysisResult, ReviewResult, ChatMessage } from "@/lib/localAI";
+import { generateTestCases } from "@/lib/testCaseGen";
+import type { TestCase } from "@/lib/testCaseGen";
+import { generateHints } from "@/lib/hints";
+import type { HintSet } from "@/lib/hints";
+import { initPyodide, subscribePyodide, runPython } from "@/lib/pyodideRunner";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type TestResult = {
+  id: string;
+  status: "pass" | "fail" | "error" | "no_expected";
+  actual: string;
+  error?: string;
+};
+
+type PyStatus = "idle" | "loading" | "ready" | "error";
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function Home() {
-  const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [error, setError] = useState("");
+  const [problem, setProblem] = useState("");
+  const [started, setStarted] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<"editor" | "chat">("editor");
-  const [currentStep, setCurrentStep] = useState<number>(1);
-  const [userCode, setUserCode] = useState<string>("");
-  const [reviewLoading, setReviewLoading] = useState(false);
-  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
-  const [reviewError, setReviewError] = useState("");
+  const [testCases, setTestCases] = useState<TestCase[]>([]);
+  const [hints, setHints] = useState<HintSet | null>(null);
 
-  const [chatInput, setChatInput] = useState("");
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-  const [chatLoading, setChatLoading] = useState(false);
-  const [chatError, setChatError] = useState("");
+  const [code, setCode] = useState("# ここにコードを書いてみましょう\n\n");
+  const [running, setRunning] = useState(false);
+  const [testResults, setTestResults] = useState<TestResult[] | null>(null);
 
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const [pyStatus, setPyStatus] = useState<PyStatus>("idle");
+  const [pyMsg, setPyMsg] = useState("");
+
+  // Hint unlock: level 1 always available, 2 unlocked after 1 opened, 3 after 2
+  const [openHint, setOpenHint] = useState<1 | 2 | 3 | null>(null);
+  const [maxUnlocked, setMaxUnlocked] = useState<0 | 1 | 2 | 3>(0);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatHistory, chatLoading]);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!prompt.trim()) return;
-
-    setLoading(true);
-    setError("");
-    setResult(null);
-    setReviewResult(null);
-    setChatHistory([]);
-    setCurrentStep(1);
-
-    try {
-      // Brief artificial delay so the loading spinner is visible
-      await new Promise((r) => setTimeout(r, 400));
-      const data = analyzeLocalProblem(prompt);
-      setResult(data);
-      setUserCode("# ここにコードを書いてみましょう\n\n");
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "予期せぬエラーが発生しました");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleReview = async () => {
-    if (!userCode.trim() || reviewLoading) return;
-
-    setReviewLoading(true);
-    setReviewError("");
-    setReviewResult(null);
-
-    try {
-      await new Promise((r) => setTimeout(r, 300));
-      const data = reviewLocalCode(prompt, userCode);
-      setReviewResult(data);
-    } catch (err: unknown) {
-      setReviewError(err instanceof Error ? err.message : "レビュー中にエラーが発生しました");
-    } finally {
-      setReviewLoading(false);
-    }
-  };
-
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!chatInput.trim() || chatLoading) return;
-
-    const userMsg = chatInput.trim();
-    setChatInput("");
-    setChatError("");
-    setChatHistory((prev) => [...prev, { role: "user", message: userMsg }]);
-    setChatLoading(true);
-
-    try {
-      await new Promise((r) => setTimeout(r, 250));
-      const reply = chatLocalResponse(prompt, chatHistory, userMsg);
-      setChatHistory((prev) => [...prev, { role: "model", message: reply }]);
-    } catch (err: unknown) {
-      setChatError(err instanceof Error ? err.message : "エラーが発生しました");
-    } finally {
-      setChatLoading(false);
-    }
-  };
-
-  const renderMarkdown = (text: string) => {
-    if (!text) return null;
-    return text.split("\n").map((line, i) => {
-      if (line.startsWith("```")) {
-        return null;
-      }
-      const boldRegex = /\*\*(.*?)\*\*/g;
-      const parts: React.ReactNode[] = [];
-      let lastIndex = 0;
-      let match;
-      while ((match = boldRegex.exec(line)) !== null) {
-        if (match.index > lastIndex) {
-          parts.push(line.substring(lastIndex, match.index));
-        }
-        parts.push(
-          <strong key={match.index} className="text-yellow-400 font-bold">
-            {match[1]}
-          </strong>
-        );
-        lastIndex = boldRegex.lastIndex;
-      }
-      if (lastIndex < line.length) {
-        parts.push(line.substring(lastIndex));
-      }
-      return (
-        <p key={i} className="min-h-[1.25rem] mb-1">
-          {parts.length > 0 ? parts : line}
-        </p>
-      );
+    return subscribePyodide((s, m) => {
+      setPyStatus(s as PyStatus);
+      setPyMsg(m);
     });
+  }, []);
+
+  // ── Handlers ───────────────────────────────────────────────────────────────
+
+  const handleStart = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!problem.trim()) return;
+    setAnalyzing(true);
+    await new Promise((r) => setTimeout(r, 150));
+
+    setTestCases(generateTestCases(problem));
+    setHints(generateHints(problem));
+    setCode("# ここにコードを書いてみましょう\n\n");
+    setTestResults(null);
+    setOpenHint(null);
+    setMaxUnlocked(0);
+    setStarted(true);
+    setAnalyzing(false);
+
+    initPyodide().catch(() => {});
   };
+
+  const handleReset = () => {
+    setStarted(false);
+    setProblem("");
+    setTestResults(null);
+  };
+
+  const handleRunTests = async () => {
+    if (!code.trim() || running || pyStatus !== "ready") return;
+    setRunning(true);
+    setTestResults(null);
+
+    const results: TestResult[] = [];
+    for (const tc of testCases) {
+      const res = await runPython(code, tc.input);
+      const actual = res.stdout.replace(/\r\n/g, "\n").trim();
+      const expected = tc.expected.replace(/\r\n/g, "\n").trim();
+
+      let status: TestResult["status"];
+      if (res.error) {
+        status = "error";
+      } else if (!expected) {
+        status = "no_expected";
+      } else {
+        status = actual === expected ? "pass" : "fail";
+      }
+      results.push({ id: tc.id, status, actual, error: res.error });
+    }
+
+    setTestResults(results);
+    setRunning(false);
+  };
+
+  const updateTestCase = (id: string, field: keyof TestCase, value: string) => {
+    setTestCases((prev) => prev.map((tc) => (tc.id === id ? { ...tc, [field]: value } : tc)));
+    setTestResults(null); // clear stale results when test cases change
+  };
+
+  const deleteTestCase = (id: string) => {
+    setTestCases((prev) => prev.filter((tc) => tc.id !== id));
+    setTestResults(null);
+  };
+
+  const addTestCase = () => {
+    const id = `tc_m_${Date.now()}`;
+    setTestCases((prev) => [
+      ...prev,
+      { id, label: `テスト${prev.length + 1}`, input: "", expected: "" },
+    ]);
+  };
+
+  const handleHintClick = (level: 1 | 2 | 3) => {
+    if (level === 2 && maxUnlocked < 1) return;
+    if (level === 3 && maxUnlocked < 2) return;
+    setOpenHint((prev) => (prev === level ? null : level));
+    if (level > maxUnlocked) setMaxUnlocked(level as 0 | 1 | 2 | 3);
+  };
+
+  // ── Derived ────────────────────────────────────────────────────────────────
+
+  const passCount = testResults?.filter((r) => r.status === "pass").length ?? 0;
+  const judgedCount = testResults?.filter((r) => r.status !== "no_expected").length ?? 0;
+  const allPass = judgedCount > 0 && passCount === judgedCount;
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <main className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto flex flex-col gap-6">
-      {/* ヘッダー */}
+
+      {/* Header */}
       <header className="text-center space-y-3 py-4 border-b border-surface-border/50">
         <div className="inline-flex items-center gap-2 bg-primary/10 border border-primary/20 px-3 py-1 rounded-full text-xs font-semibold text-primary">
           <Sparkles className="w-3.5 h-3.5" />
-          Prototype v2
+          v3 — テストケース型採点
         </div>
         <h1 className="text-3xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 via-indigo-400 to-purple-400 bg-clip-text text-transparent">
           思考補助AI for Python
         </h1>
         <p className="text-gray-400 text-sm md:text-base max-w-2xl mx-auto">
-          プログラミングの課題を入力してください。
-          答えのコードではなく、自力で解くための「思考の手順」を段階的にガイドし、書いたコードのフィードバックを行います。
+          課題を入力 → テストケースで実際に採点 → 段階的ヒントで自力解決
         </p>
       </header>
 
-      {/* 課題入力フォーム */}
-      {!result && (
-        <section className="bg-surface p-6 rounded-2xl shadow-lg border border-surface-border max-w-3xl mx-auto w-full transition-all duration-300">
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <div className="flex items-center gap-2 mb-1">
+      {/* Problem input form */}
+      {!started && (
+        <section className="bg-surface p-6 rounded-2xl shadow-lg border border-surface-border max-w-3xl mx-auto w-full">
+          <form onSubmit={handleStart} className="flex flex-col gap-4">
+            <div className="flex items-center gap-2">
               <Terminal className="w-5 h-5 text-primary" />
-              <label htmlFor="prompt" className="font-semibold text-gray-200">
+              <label htmlFor="problem" className="font-semibold text-gray-200">
                 Pythonの課題文を入力
               </label>
             </div>
             <textarea
-              id="prompt"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="例：1から10までの数字のうち、偶数だけを出力するプログラムを作りたい"
-              className="w-full min-h-[140px] p-4 bg-gray-900/50 border border-surface-border rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent outline-none resize-y text-gray-100 placeholder-gray-500 transition-all font-sans"
-              disabled={loading}
+              id="problem"
+              value={problem}
+              onChange={(e) => setProblem(e.target.value)}
+              placeholder={"例：1から10までの偶数をすべて出力するプログラムを作りなさい\n\n例：2つの整数を入力し、その合計を出力するプログラムを作りなさい"}
+              className="w-full min-h-[140px] p-4 bg-gray-900/50 border border-surface-border rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent outline-none resize-y text-gray-100 placeholder-gray-500 transition-all"
+              disabled={analyzing}
             />
             <button
               type="submit"
-              disabled={!prompt.trim() || loading}
+              disabled={!problem.trim() || analyzing}
               className="self-end px-6 py-3 bg-primary hover:bg-primary-hover text-white rounded-xl font-medium transition-all shadow-md flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5"
             >
-              {loading ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>思考を整理中...</span>
-                </>
+              {analyzing ? (
+                <><Loader2 className="w-5 h-5 animate-spin" /><span>準備中...</span></>
               ) : (
-                <>
-                  <Send className="w-5 h-5" />
-                  <span>思考を開始する</span>
-                </>
+                <><Send className="w-5 h-5" /><span>思考を開始する</span></>
               )}
             </button>
           </form>
         </section>
       )}
 
-      {error && (
-        <div className="bg-red-900/30 border border-red-800 text-red-200 p-4 rounded-xl flex items-center gap-3 max-w-3xl mx-auto w-full">
-          <AlertCircle className="w-5 h-5 flex-shrink-0" />
-          <p>{error}</p>
-        </div>
-      )}
+      {/* Main area (after start) */}
+      {started && hints && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-in fade-in duration-300">
 
-      {/* メインエリア：解析後の2カラムレイアウト */}
-      {result && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-in fade-in duration-500 ease-out">
-
-          {/* 左カラム：思考のステップ（段階的UI） */}
+          {/* ── Left column ──────────────────────────────────────────────── */}
           <div className="lg:col-span-5 flex flex-col gap-4">
-            <div className="flex justify-between items-center bg-surface/50 border border-surface-border p-4 rounded-xl">
-              <span className="text-xs text-gray-400 font-medium">課題</span>
-              <button
-                onClick={() => {
-                  setResult(null);
-                  setPrompt("");
-                }}
-                className="text-xs text-primary hover:underline flex items-center gap-1"
-              >
-                <RefreshCw className="w-3 h-3" />
-                別の課題に変更する
-              </button>
-            </div>
 
+            {/* Problem card */}
             <div className="bg-surface/80 backdrop-blur-md p-4 rounded-xl border border-surface-border">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">取り組む課題</h3>
-              <p className="text-sm text-gray-200 bg-gray-950/40 p-3 rounded-lg border border-surface-border/40 whitespace-pre-wrap">
-                {prompt}
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">取り組む課題</h3>
+                <button
+                  onClick={handleReset}
+                  className="text-xs text-primary hover:underline flex items-center gap-1"
+                >
+                  <RefreshCw className="w-3 h-3" />別の課題に変更
+                </button>
+              </div>
+              <p className="text-sm text-gray-200 bg-gray-950/40 p-3 rounded-lg border border-surface-border/40 whitespace-pre-wrap leading-relaxed">
+                {problem}
               </p>
             </div>
 
-            {/* 段階的なステップUI */}
-            <div className="space-y-3">
-              <h2 className="text-lg font-bold text-gray-100 flex items-center gap-2 px-1">
-                <Sparkles className="w-5 h-5 text-indigo-400" />
-                思考を組み立てよう
-              </h2>
+            {/* Test cases panel */}
+            <div className="bg-surface/80 backdrop-blur-md rounded-xl border border-surface-border overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border/60">
+                <h3 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-indigo-400" />
+                  テストケース
+                </h3>
+                <button
+                  onClick={addTestCase}
+                  className="flex items-center gap-1 text-xs text-primary hover:text-white transition-colors px-2 py-1 rounded-lg hover:bg-primary/20"
+                >
+                  <Plus className="w-3.5 h-3.5" />追加
+                </button>
+              </div>
 
-              <StepCard
-                stepNumber={1}
-                title="問題の目的を確認する"
-                icon={<Target className="w-5 h-5 text-blue-400" />}
-                activeStep={currentStep}
-                onSelect={() => setCurrentStep(1)}
-              >
-                <p className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap">
-                  {result.purpose}
-                </p>
-                {currentStep === 1 && (
-                  <button
-                    onClick={() => setCurrentStep(2)}
-                    className="mt-3 w-full py-2 bg-gray-800 hover:bg-gray-700 text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-colors text-blue-300"
-                  >
-                    目的を理解した。次へ <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
+              <div className="flex flex-col gap-3 p-4">
+                {testCases.length === 0 && (
+                  <p className="text-xs text-gray-500 text-center py-4">
+                    テストケースがありません。「追加」から作成してください。
+                  </p>
                 )}
-              </StepCard>
+                {testCases.map((tc, idx) => {
+                  const result = testResults?.find((r) => r.id === tc.id);
+                  return (
+                    <TestCaseCard
+                      key={tc.id}
+                      index={idx}
+                      testCase={tc}
+                      result={result}
+                      onChange={(field, value) => updateTestCase(tc.id, field, value)}
+                      onDelete={() => deleteTestCase(tc.id)}
+                    />
+                  );
+                })}
+              </div>
+            </div>
 
-              <StepCard
-                stepNumber={2}
-                title="必要なデータと条件分岐"
-                icon={
-                  <div className="flex gap-0.5">
-                    <Type className="w-4 h-4 text-green-400" />
-                    <GitBranch className="w-4 h-4 text-purple-400" />
-                  </div>
-                }
-                activeStep={currentStep}
-                onSelect={() => setCurrentStep(2)}
-              >
-                <div className="space-y-3 text-sm">
-                  <div>
-                    <span className="text-xs font-bold text-green-400 block mb-1">■ 必要なデータ (入力値):</span>
-                    <p className="text-gray-300 whitespace-pre-wrap">{result.inputs}</p>
-                  </div>
-                  <div className="border-t border-surface-border/50 pt-2">
-                    <span className="text-xs font-bold text-purple-400 block mb-1">■ 条件分岐:</span>
-                    <p className="text-gray-300 whitespace-pre-wrap">{result.branches}</p>
-                  </div>
-                </div>
-                {currentStep === 2 && (
-                  <button
-                    onClick={() => setCurrentStep(3)}
-                    className="mt-3 w-full py-2 bg-gray-800 hover:bg-gray-700 text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-colors text-purple-300"
-                  >
-                    データと条件を整理した。次へ <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </StepCard>
-
-              <StepCard
-                stepNumber={3}
-                title="コードの設計（手順）"
-                icon={<ListOrdered className="w-5 h-5 text-orange-400" />}
-                activeStep={currentStep}
-                onSelect={() => setCurrentStep(3)}
-              >
-                <p className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap">
-                  {result.steps}
-                </p>
-                {currentStep === 3 && (
-                  <button
-                    onClick={() => setCurrentStep(4)}
-                    className="mt-3 w-full py-2 bg-gray-800 hover:bg-gray-700 text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-colors text-orange-300"
-                  >
-                    手順を確認した。最後へ <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </StepCard>
-
-              <StepCard
-                stepNumber={4}
-                title="実装のヒント"
-                icon={<Lightbulb className="w-5 h-5 text-yellow-400" />}
-                activeStep={currentStep}
-                onSelect={() => setCurrentStep(4)}
-              >
-                <p className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap">
-                  {result.hints}
-                </p>
-                <div className="mt-3 bg-yellow-950/20 border border-yellow-900/40 p-2.5 rounded-lg text-xs text-yellow-300/90">
-                  💡 右側の「コードを書いてみる」タブを開いて、このヒントを参考にPythonプログラムを入力してみましょう！
-                </div>
-              </StepCard>
+            {/* 3-level hints */}
+            <div className="bg-surface/80 backdrop-blur-md rounded-xl border border-surface-border overflow-hidden">
+              <div className="px-4 py-3 border-b border-surface-border/60">
+                <h3 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-yellow-400" />
+                  段階的ヒント
+                  <span className="text-xs text-gray-500 font-normal">（順番に開いてください）</span>
+                </h3>
+              </div>
+              <div className="flex flex-col divide-y divide-surface-border/40">
+                <HintCard
+                  level={1}
+                  title="ヒント1：考える方向性"
+                  content={hints.hint1}
+                  isOpen={openHint === 1}
+                  isLocked={false}
+                  onClick={() => handleHintClick(1)}
+                />
+                <HintCard
+                  level={2}
+                  title="ヒント2：使うべき文法・関数"
+                  content={hints.hint2}
+                  isOpen={openHint === 2}
+                  isLocked={maxUnlocked < 1}
+                  onClick={() => handleHintClick(2)}
+                />
+                <HintCard
+                  level={3}
+                  title="ヒント3：ほぼ解法"
+                  content={hints.hint3}
+                  isOpen={openHint === 3}
+                  isLocked={maxUnlocked < 2}
+                  onClick={() => handleHintClick(3)}
+                />
+              </div>
             </div>
           </div>
 
-          {/* 右カラム：実践とサポート（エディタ ＆ チャット） */}
-          <div className="lg:col-span-7 flex flex-col min-h-[550px] bg-surface rounded-2xl border border-surface-border overflow-hidden shadow-xl">
+          {/* ── Right column ─────────────────────────────────────────────── */}
+          <div className="lg:col-span-7 flex flex-col gap-4">
 
-            {/* タブヘッダー */}
-            <div className="flex border-b border-surface-border bg-gray-900/40">
-              <button
-                onClick={() => setActiveTab("editor")}
-                className={`flex-1 py-4 px-6 font-semibold text-sm transition-all flex items-center justify-center gap-2 border-b-2 ${
-                  activeTab === "editor"
-                    ? "border-primary text-primary bg-surface/30"
-                    : "border-transparent text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <Code className="w-4 h-4" />
-                コードを書いてみる
-              </button>
-              <button
-                onClick={() => setActiveTab("chat")}
-                className={`flex-1 py-4 px-6 font-semibold text-sm transition-all flex items-center justify-center gap-2 border-b-2 ${
-                  activeTab === "chat"
-                    ? "border-primary text-primary bg-surface/30"
-                    : "border-transparent text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <MessageSquare className="w-4 h-4" />
-                AIに質問する (答えは教えない)
-              </button>
+            {/* Code editor */}
+            <div className="bg-surface rounded-2xl border border-surface-border overflow-hidden shadow-xl flex flex-col">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border bg-gray-900/40">
+                <div className="flex items-center gap-2 text-xs text-gray-400">
+                  <Terminal className="w-3.5 h-3.5" />
+                  Python エディタ
+                </div>
+                <span className="text-[10px] text-gray-500 font-mono bg-gray-950 px-2 py-0.5 rounded border border-surface-border">
+                  python3
+                </span>
+              </div>
+
+              {/* Editor body */}
+              <div className="relative bg-gray-950 flex font-mono text-sm" style={{ minHeight: "280px" }}>
+                <div className="bg-gray-900/50 text-gray-600 px-3 py-4 text-right select-none border-r border-surface-border/40 text-xs flex flex-col min-w-[2.5rem]">
+                  {Array.from({ length: Math.max(14, code.split("\n").length) }).map((_, i) => (
+                    <div key={i} className="leading-[1.625rem]">{i + 1}</div>
+                  ))}
+                </div>
+                <textarea
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="# ここにPythonコードを入力してください"
+                  className="flex-1 p-4 bg-transparent outline-none resize-none text-gray-200 placeholder-gray-600 font-mono text-sm leading-[1.625rem]"
+                  spellCheck={false}
+                  style={{ minHeight: "280px" }}
+                />
+              </div>
+
+              {/* Run bar */}
+              <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-surface-border/60 bg-gray-900/20">
+                <PyodideStatusBadge status={pyStatus} msg={pyMsg} />
+                <button
+                  onClick={handleRunTests}
+                  disabled={running || pyStatus !== "ready" || testCases.length === 0}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-green-700 hover:bg-green-600 disabled:bg-green-950/50 disabled:text-green-900 text-white font-semibold rounded-xl text-sm transition-all shadow hover:-translate-y-0.5 disabled:translate-y-0 disabled:cursor-not-allowed"
+                >
+                  {running ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" />実行中...</>
+                  ) : (
+                    <><Play className="w-4 h-4" />テストを実行</>
+                  )}
+                </button>
+              </div>
             </div>
 
-            {/* タブコンテンツ */}
-            <div className="flex-1 flex flex-col p-6 min-h-[450px]">
-
-              {/* === タブ1: コードエディタと検証 === */}
-              {activeTab === "editor" && (
-                <div className="flex-1 flex flex-col gap-4 animate-in fade-in duration-200">
-                  <div className="flex justify-between items-center">
-                    <div className="flex items-center gap-1.5 text-xs text-gray-400">
-                      <Terminal className="w-3.5 h-3.5" />
-                      <span>Python エディタ</span>
-                    </div>
-                    <span className="text-[10px] text-gray-500 font-mono bg-gray-950 px-2 py-0.5 rounded border border-surface-border">
-                      python3
+            {/* Test results */}
+            {testResults && (
+              <div className="bg-surface rounded-2xl border border-surface-border overflow-hidden shadow-xl animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border/60 bg-gray-900/40">
+                  <h3 className="text-sm font-semibold text-gray-200">テスト結果</h3>
+                  {judgedCount > 0 && (
+                    <span className={`text-sm font-bold px-3 py-1 rounded-full border ${
+                      allPass
+                        ? "bg-green-900/40 text-green-300 border-green-700/50"
+                        : "bg-red-900/30 text-red-300 border-red-700/40"
+                    }`}>
+                      {passCount} / {judgedCount} PASS
                     </span>
-                  </div>
-
-                  <div className="relative flex-1 min-h-[220px] bg-gray-950 rounded-xl border border-surface-border/80 overflow-hidden flex font-mono text-sm">
-                    <div className="bg-gray-900/50 text-gray-600 px-3 py-4 text-right select-none border-r border-surface-border/40 text-xs flex flex-col gap-1 min-w-[2.5rem]">
-                      {Array.from({ length: Math.max(10, userCode.split("\n").length) }).map((_, i) => (
-                        <div key={i}>{i + 1}</div>
-                      ))}
-                    </div>
-                    <textarea
-                      value={userCode}
-                      onChange={(e) => setUserCode(e.target.value)}
-                      placeholder="# ここにPythonコードを入力してください&#10;# 例:&#10;# for i in range(1, 11):&#10;#     if i % 2 == 0:&#10;#         print(i)"
-                      className="flex-1 p-4 bg-transparent outline-none resize-none text-gray-200 placeholder-gray-600 font-mono text-sm leading-relaxed overflow-y-auto"
-                      spellCheck={false}
-                    />
-                  </div>
-
-                  {reviewError && (
-                    <div className="bg-red-950/20 border border-red-900/50 text-red-300 p-3.5 rounded-lg flex items-center gap-2.5 text-xs">
-                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                      <p>{reviewError}</p>
-                    </div>
-                  )}
-
-                  <div className="flex justify-end">
-                    <button
-                      onClick={handleReview}
-                      disabled={reviewLoading || !userCode.trim()}
-                      className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800/40 text-white font-medium rounded-xl text-sm transition-all flex items-center gap-2 shadow hover:-translate-y-0.5 disabled:translate-y-0 disabled:cursor-not-allowed"
-                    >
-                      {reviewLoading ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          <span>コードを分析中...</span>
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span>コードを検証してもらう</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {reviewResult && (
-                    <div
-                      className={`mt-2 p-5 rounded-xl border animate-in fade-in slide-in-from-bottom-2 duration-300 ${
-                        reviewResult.status === "correct"
-                          ? "bg-green-950/15 border-green-800/60 text-green-100"
-                          : reviewResult.status === "needs_improvement"
-                          ? "bg-yellow-950/15 border-yellow-800/50 text-yellow-100"
-                          : "bg-red-950/15 border-red-800/60 text-red-100"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 mb-3">
-                        {reviewResult.status === "correct" ? (
-                          <div className="w-6 h-6 rounded-full bg-green-500/20 border border-green-500/40 flex items-center justify-center">
-                            <span className="text-xs">🎉</span>
-                          </div>
-                        ) : reviewResult.status === "needs_improvement" ? (
-                          <div className="w-6 h-6 rounded-full bg-yellow-500/20 border border-yellow-500/40 flex items-center justify-center">
-                            <span className="text-xs">🤔</span>
-                          </div>
-                        ) : (
-                          <div className="w-6 h-6 rounded-full bg-red-500/20 border border-red-500/40 flex items-center justify-center">
-                            <span className="text-xs">❌</span>
-                          </div>
-                        )}
-                        <h4 className="font-bold text-sm">
-                          判定:{" "}
-                          {reviewResult.status === "correct"
-                            ? "正しく作れています！"
-                            : reviewResult.status === "needs_improvement"
-                            ? "惜しい！あと少しです"
-                            : "エラーがある、または要件を満たしていません"}
-                        </h4>
-                      </div>
-                      <div className="text-sm leading-relaxed space-y-1 pl-1 text-gray-300">
-                        {renderMarkdown(reviewResult.review)}
-                      </div>
-                    </div>
                   )}
                 </div>
-              )}
-
-              {/* === タブ2: チャット対話機能 === */}
-              {activeTab === "chat" && (
-                <div className="flex-1 flex flex-col gap-4 animate-in fade-in duration-200 overflow-hidden">
-                  <div className="flex-1 bg-gray-950/40 rounded-xl border border-surface-border/50 p-4 overflow-y-auto max-h-[350px] flex flex-col gap-4">
-                    <div className="flex gap-3 max-w-[85%] self-start">
-                      <div className="w-7 h-7 rounded-full bg-indigo-900/50 border border-indigo-700/50 flex items-center justify-center flex-shrink-0 text-xs">
-                        🤖
-                      </div>
-                      <div className="bg-surface border border-surface-border/60 px-4 py-2.5 rounded-2xl rounded-tl-none text-sm text-gray-300 leading-relaxed shadow-sm">
-                        お疲れ様です！課題のヒントや手順についてわからないことはありますか？
-                        「この手順はどう実装する？」「このエラーはどう解決する？」など、何でも聞いてください。
-                        答えのコードを直接出すことはしませんが、考え方のサポートを全力で行います！
-                      </div>
-                    </div>
-
-                    {chatHistory.map((item, idx) => (
-                      <div
-                        key={idx}
-                        className={`flex gap-3 max-w-[85%] ${item.role === "user" ? "self-end flex-row-reverse" : "self-start"}`}
-                      >
-                        <div
-                          className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs ${
-                            item.role === "user"
-                              ? "bg-primary/20 border border-primary/40 text-primary"
-                              : "bg-indigo-900/50 border border-indigo-700/50"
-                          }`}
-                        >
-                          {item.role === "user" ? "👤" : "🤖"}
-                        </div>
-                        <div
-                          className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm ${
-                            item.role === "user"
-                              ? "bg-primary hover:bg-primary-hover text-white rounded-tr-none font-medium"
-                              : "bg-surface border border-surface-border/60 text-gray-300 rounded-tl-none"
-                          }`}
-                        >
-                          {item.role === "user" ? (
-                            <p className="whitespace-pre-wrap">{item.message}</p>
-                          ) : (
-                            renderMarkdown(item.message)
-                          )}
-                        </div>
-                      </div>
-                    ))}
-
-                    {chatLoading && (
-                      <div className="flex gap-3 max-w-[85%] self-start">
-                        <div className="w-7 h-7 rounded-full bg-indigo-900/50 border border-indigo-700/50 flex items-center justify-center flex-shrink-0 text-xs animate-pulse">
-                          🤖
-                        </div>
-                        <div className="bg-surface border border-surface-border/60 px-4 py-2.5 rounded-2xl rounded-tl-none text-sm text-gray-400 flex items-center gap-2 shadow-sm">
-                          <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
-                          <span>思考のプロセスを巡らせています...</span>
-                        </div>
-                      </div>
-                    )}
-
-                    <div ref={chatEndRef} />
-                  </div>
-
-                  {chatError && (
-                    <div className="bg-red-950/20 border border-red-900/50 text-red-300 p-3 rounded-lg flex items-center gap-2 text-xs">
-                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                      <p>{chatError}</p>
-                    </div>
-                  )}
-
-                  <form onSubmit={handleSendMessage} className="flex gap-2">
-                    <input
-                      type="text"
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      placeholder="例：「手順2の偶数の判定方法をもう少しヒントください」"
-                      className="flex-1 px-4 py-3 bg-gray-950 border border-surface-border rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent outline-none text-sm text-gray-200 placeholder-gray-600 transition-all"
-                      disabled={chatLoading}
-                    />
-                    <button
-                      type="submit"
-                      disabled={chatLoading || !chatInput.trim()}
-                      className="px-4 bg-primary hover:bg-primary-hover disabled:bg-primary/40 text-white rounded-xl transition-all flex items-center justify-center disabled:cursor-not-allowed"
-                    >
-                      <Send className="w-4 h-4" />
-                    </button>
-                  </form>
+                <div className="flex flex-col divide-y divide-surface-border/30">
+                  {testResults.map((result) => {
+                    const tc = testCases.find((t) => t.id === result.id);
+                    if (!tc) return null;
+                    return <ResultRow key={result.id} testCase={tc} result={result} />;
+                  })}
                 </div>
-              )}
-            </div>
+                {allPass && (
+                  <div className="px-5 py-4 bg-green-950/20 border-t border-green-800/40 text-green-200 text-sm">
+                    🎉 すべてのテストに合格しました！実際にPythonで動かして確認してみましょう。
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -536,76 +370,305 @@ export default function Home() {
   );
 }
 
-// 段階的ステップ用カードコンポーネント
-interface StepCardProps {
-  stepNumber: number;
-  title: string;
-  icon: React.ReactNode;
-  activeStep: number;
-  onSelect: () => void;
-  children: React.ReactNode;
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+// Pyodide status indicator
+function PyodideStatusBadge({ status, msg }: { status: PyStatus; msg: string }) {
+  if (status === "idle") return null;
+  if (status === "ready") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-green-400">
+        <Wifi className="w-3.5 h-3.5" />
+        <span>Python実行環境 準備完了</span>
+      </div>
+    );
+  }
+  if (status === "loading") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-yellow-400">
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        <span>{msg || "Pythonランタイムを準備中..."}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-red-400" title={msg}>
+      <WifiOff className="w-3.5 h-3.5" />
+      <span>ランタイムエラー（ネット接続を確認）</span>
+    </div>
+  );
 }
 
-function StepCard({ stepNumber, title, icon, activeStep, onSelect, children }: StepCardProps) {
-  const isOpen = activeStep >= stepNumber;
-  const isCurrent = activeStep === stepNumber;
+// Single test case editor card
+interface TestCaseCardProps {
+  index: number;
+  testCase: TestCase;
+  result?: TestResult;
+  onChange: (field: keyof TestCase, value: string) => void;
+  onDelete: () => void;
+}
+
+function TestCaseCard({ index, testCase, result, onChange, onDelete }: TestCaseCardProps) {
+  const statusIcon = result
+    ? result.status === "pass"
+      ? <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+      : result.status === "fail"
+      ? <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+      : result.status === "error"
+      ? <AlertCircle className="w-4 h-4 text-orange-400 flex-shrink-0" />
+      : null
+    : null;
 
   return (
-    <div
-      className={`transition-all duration-300 rounded-xl overflow-hidden border ${
-        isCurrent
-          ? "border-primary bg-primary/5 shadow-md shadow-primary/5"
-          : isOpen
-          ? "border-surface-border bg-surface/40"
-          : "border-surface-border/30 bg-surface/10 opacity-50"
-      }`}
-    >
-      <button
-        onClick={() => {
-          if (activeStep >= stepNumber) {
-            onSelect();
-          }
-        }}
-        disabled={activeStep < stepNumber}
-        className={`w-full text-left p-4 flex items-center justify-between transition-all ${
-          activeStep >= stepNumber ? "cursor-pointer hover:bg-surface/50" : "cursor-not-allowed"
-        }`}
-      >
-        <div className="flex items-center gap-3">
-          <div
-            className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${
-              isCurrent
-                ? "bg-primary text-white"
-                : isOpen
-                ? "bg-surface-border text-gray-300 border border-surface-border"
-                : "bg-transparent text-gray-600 border border-surface-border/20"
-            }`}
-          >
-            {stepNumber}
-          </div>
-          <div className="flex items-center gap-2">
-            {icon}
-            <span
-              className={`font-semibold text-sm md:text-base ${
-                isCurrent ? "text-primary" : isOpen ? "text-gray-200" : "text-gray-500"
-              }`}
-            >
-              {title}
-            </span>
-          </div>
+    <div className={`rounded-lg border overflow-hidden ${
+      result?.status === "pass"
+        ? "border-green-800/60"
+        : result?.status === "fail"
+        ? "border-red-800/60"
+        : result?.status === "error"
+        ? "border-orange-800/60"
+        : "border-surface-border/60"
+    }`}>
+      {/* Card header */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-gray-900/40 border-b border-surface-border/40">
+        {statusIcon}
+        <input
+          type="text"
+          value={testCase.label}
+          onChange={(e) => onChange("label", e.target.value)}
+          className="flex-1 bg-transparent text-xs font-semibold text-gray-300 outline-none placeholder-gray-600"
+          placeholder={`テスト${index + 1}`}
+        />
+        <button
+          onClick={onDelete}
+          className="text-gray-600 hover:text-red-400 transition-colors p-0.5"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {/* Input / Expected fields */}
+      <div className="grid grid-cols-2 divide-x divide-surface-border/40">
+        <div className="p-2">
+          <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">入力 (stdin)</div>
+          <textarea
+            value={testCase.input}
+            onChange={(e) => onChange("input", e.target.value)}
+            className="w-full text-xs bg-gray-950/60 text-gray-300 rounded p-1.5 outline-none resize-none font-mono border border-surface-border/30 focus:border-primary/50 placeholder-gray-700"
+            rows={3}
+            placeholder="（なし）"
+          />
         </div>
-        {isOpen && (
-          <div className="text-gray-400">
-            {isCurrent ? <ChevronUp className="w-4 h-4 text-primary" /> : <ChevronDown className="w-4 h-4" />}
-          </div>
+        <div className="p-2">
+          <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">期待する出力</div>
+          <textarea
+            value={testCase.expected}
+            onChange={(e) => onChange("expected", e.target.value)}
+            className="w-full text-xs bg-gray-950/60 text-gray-300 rounded p-1.5 outline-none resize-none font-mono border border-surface-border/30 focus:border-primary/50 placeholder-gray-700"
+            rows={3}
+            placeholder="（未設定）"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Result row in the results panel
+interface ResultRowProps {
+  testCase: TestCase;
+  result: TestResult;
+}
+
+function ResultRow({ testCase, result }: ResultRowProps) {
+  const [expanded, setExpanded] = useState(result.status !== "pass");
+
+  const bgClass =
+    result.status === "pass"
+      ? "bg-green-950/10"
+      : result.status === "fail"
+      ? "bg-red-950/10"
+      : result.status === "error"
+      ? "bg-orange-950/10"
+      : "bg-gray-900/10";
+
+  const badge =
+    result.status === "pass" ? (
+      <span className="text-xs font-bold text-green-400 bg-green-900/30 border border-green-800/50 px-2 py-0.5 rounded-full">PASS</span>
+    ) : result.status === "fail" ? (
+      <span className="text-xs font-bold text-red-400 bg-red-900/30 border border-red-800/50 px-2 py-0.5 rounded-full">FAIL</span>
+    ) : result.status === "error" ? (
+      <span className="text-xs font-bold text-orange-400 bg-orange-900/30 border border-orange-800/50 px-2 py-0.5 rounded-full">ERROR</span>
+    ) : (
+      <span className="text-xs font-bold text-gray-400 bg-gray-900/40 border border-gray-700/50 px-2 py-0.5 rounded-full">出力確認</span>
+    );
+
+  return (
+    <div className={`${bgClass}`}>
+      {/* Row header */}
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-white/5 transition-colors"
+      >
+        {result.status === "pass" ? (
+          <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+        ) : result.status === "fail" ? (
+          <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+        ) : result.status === "error" ? (
+          <AlertCircle className="w-4 h-4 text-orange-400 flex-shrink-0" />
+        ) : (
+          <div className="w-4 h-4 rounded-full border-2 border-gray-600 flex-shrink-0" />
+        )}
+        <span className="text-sm font-medium text-gray-200 flex-1">{testCase.label}</span>
+        {badge}
+        {expanded ? (
+          <ChevronUp className="w-3.5 h-3.5 text-gray-500" />
+        ) : (
+          <ChevronDown className="w-3.5 h-3.5 text-gray-500" />
         )}
       </button>
 
-      {isOpen && isCurrent && (
-        <div className="px-4 pb-4 pt-1 animate-in fade-in slide-in-from-top-1 duration-200">
-          <div className="pl-11 border-l-2 border-surface-border/50 ml-4 py-2">{children}</div>
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-3 gap-3 animate-in fade-in duration-150">
+          {testCase.input && (
+            <div>
+              <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">入力</div>
+              <pre className="text-xs font-mono bg-gray-950/60 rounded p-2 text-gray-300 whitespace-pre-wrap border border-surface-border/30">
+                {testCase.input}
+              </pre>
+            </div>
+          )}
+          {testCase.expected && (
+            <div>
+              <div className="text-[10px] font-semibold text-gray-500 uppercase mb-1">期待する出力</div>
+              <pre className="text-xs font-mono bg-gray-950/60 rounded p-2 text-gray-300 whitespace-pre-wrap border border-surface-border/30">
+                {testCase.expected}
+              </pre>
+            </div>
+          )}
+          <div>
+            <div className={`text-[10px] font-semibold uppercase mb-1 ${
+              result.status === "error" ? "text-orange-500" : "text-gray-500"
+            }`}>
+              {result.status === "error" ? "エラー" : "実際の出力"}
+            </div>
+            <pre className={`text-xs font-mono rounded p-2 whitespace-pre-wrap border ${
+              result.status === "pass"
+                ? "bg-green-950/20 text-green-200 border-green-800/40"
+                : result.status === "fail"
+                ? "bg-red-950/20 text-red-200 border-red-800/40"
+                : result.status === "error"
+                ? "bg-orange-950/20 text-orange-200 border-orange-800/40"
+                : "bg-gray-950/60 text-gray-300 border-surface-border/30"
+            }`}>
+              {result.error ?? (result.actual || "（出力なし）")}
+            </pre>
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+// Progressive hint card
+interface HintCardProps {
+  level: 1 | 2 | 3;
+  title: string;
+  content: string;
+  isOpen: boolean;
+  isLocked: boolean;
+  onClick: () => void;
+}
+
+function HintCard({ level, title, content, isOpen, isLocked, onClick }: HintCardProps) {
+  const levelColors = {
+    1: "text-blue-400 bg-blue-900/20 border-blue-800/40",
+    2: "text-purple-400 bg-purple-900/20 border-purple-800/40",
+    3: "text-orange-400 bg-orange-900/20 border-orange-800/40",
+  };
+
+  return (
+    <div>
+      <button
+        onClick={onClick}
+        disabled={isLocked}
+        className={`w-full flex items-center gap-3 px-4 py-3.5 text-left transition-all ${
+          isLocked
+            ? "cursor-not-allowed opacity-40"
+            : "hover:bg-surface/60 cursor-pointer"
+        }`}
+      >
+        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold border ${
+          isLocked ? "bg-gray-900 border-gray-700 text-gray-600" : levelColors[level]
+        }`}>
+          {isLocked ? <Lock className="w-3 h-3" /> : level}
+        </div>
+        <span className={`text-sm font-semibold flex-1 ${isLocked ? "text-gray-600" : "text-gray-200"}`}>
+          {title}
+        </span>
+        {!isLocked && (
+          isOpen
+            ? <ChevronUp className="w-4 h-4 text-gray-400" />
+            : <ChevronDown className="w-4 h-4 text-gray-500" />
+        )}
+      </button>
+
+      {isOpen && !isLocked && (
+        <div className="px-4 pb-4 animate-in fade-in slide-in-from-top-1 duration-200">
+          <div className="pl-9">
+            <HintContent text={content} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Render hint content with inline code and code blocks
+function HintContent({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const elements: React.ReactNode[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Code block
+    if (line.trimStart().startsWith("```")) {
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      elements.push(
+        <pre key={i} className="mt-2 mb-2 text-xs font-mono bg-gray-950/70 border border-surface-border/40 rounded-lg p-3 text-gray-200 whitespace-pre overflow-x-auto">
+          {codeLines.join("\n")}
+        </pre>
+      );
+    } else {
+      elements.push(
+        <p key={i} className={`text-sm text-gray-300 leading-relaxed ${line === "" ? "h-2" : "mb-1"}`}>
+          {renderInlineCode(line)}
+        </p>
+      );
+    }
+    i++;
+  }
+
+  return <div>{elements}</div>;
+}
+
+function renderInlineCode(text: string): React.ReactNode {
+  const parts = text.split(/(`[^`]+`)/g);
+  return parts.map((part, i) =>
+    part.startsWith("`") && part.endsWith("`") ? (
+      <code key={i} className="text-xs font-mono bg-gray-800 text-yellow-300 px-1.5 py-0.5 rounded">
+        {part.slice(1, -1)}
+      </code>
+    ) : (
+      part
+    )
   );
 }
