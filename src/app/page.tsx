@@ -1,31 +1,13 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { 
-  Send, Loader2, Target, Type, GitBranch, ListOrdered, Lightbulb, 
-  AlertCircle, Code, MessageSquare, CheckCircle2, HelpCircle, 
-  ArrowRight, ChevronRight, Terminal, RefreshCw, Sparkles, ChevronDown, ChevronUp,
-  Settings, X
+import {
+  Send, Loader2, Target, Type, GitBranch, ListOrdered, Lightbulb,
+  AlertCircle, Code, MessageSquare, CheckCircle2,
+  ArrowRight, Terminal, RefreshCw, Sparkles, ChevronDown, ChevronUp,
 } from "lucide-react";
-import { GoogleGenAI } from "@google/genai";
-
-type AnalysisResult = {
-  purpose: string;
-  inputs: string;
-  branches: string;
-  steps: string;
-  hints: string;
-};
-
-type ReviewResult = {
-  status: "correct" | "needs_improvement" | "error";
-  review: string;
-};
-
-type ChatMessage = {
-  role: "user" | "model";
-  message: string;
-};
+import { analyzeLocalProblem, reviewLocalCode, chatLocalResponse } from "@/lib/localAI";
+import type { AnalysisResult, ReviewResult, ChatMessage } from "@/lib/localAI";
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
@@ -33,34 +15,6 @@ export default function Home() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState("");
 
-  // APIキー関連のステート
-  const [apiKey, setApiKey] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
-  const [tempApiKey, setTempApiKey] = useState("");
-
-  // 初期ロード時にLocalStorageや環境変数からAPIキーを取得
-  useEffect(() => {
-    const savedKey = localStorage.getItem("gemini_api_key") || "";
-    const envKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
-    const activeKey = savedKey || envKey;
-    setApiKey(activeKey);
-    setTempApiKey(activeKey);
-  }, []);
-
-  const handleSaveApiKey = (key: string) => {
-    localStorage.setItem("gemini_api_key", key);
-    setApiKey(key);
-    setShowSettings(false);
-  };
-
-  const getAiClient = () => {
-    if (!apiKey) {
-      throw new Error("Gemini APIキーが設定されていません。画面右上の設定（ギアアイコン）からAPIキーを入力してください。");
-    }
-    return new GoogleGenAI({ apiKey });
-  };
-
-  // 新機能関連のステート
   const [activeTab, setActiveTab] = useState<"editor" | "chat">("editor");
   const [currentStep, setCurrentStep] = useState<number>(1);
   const [userCode, setUserCode] = useState<string>("");
@@ -68,7 +22,6 @@ export default function Home() {
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
   const [reviewError, setReviewError] = useState("");
 
-  // チャット関連のステート
   const [chatInput, setChatInput] = useState("");
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
@@ -76,7 +29,6 @@ export default function Home() {
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // チャットの自動スクロール
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatHistory, chatLoading]);
@@ -93,52 +45,18 @@ export default function Home() {
     setCurrentStep(1);
 
     try {
-      const ai = getAiClient();
-      const systemInstruction = `あなたはPython初学者のための「思考補助AI」です。
-ユーザーからPythonの課題文が与えられます。
-以下の制約を厳守して回答してください。
-
-【絶対の制約】
-1. 完成したPythonコード（答え）は絶対に提示しないこと。
-2. 初学者がつまずかないよう、優しく励ますようなトーンで丁寧に説明すること。
-3. 指定された5つの項目ごとに整理して思考プロセスを出力すること。
-4. 必ずJSON形式で出力し、指定されたキーのみを含むこと。
-
-【出力JSONのキーと内容】
-- "purpose": 問題の目的（何を解決・実現するためのプログラムか）
-- "inputs": 入力値（プログラムに必要なデータ、変数、ユーザーからの入力は何か）
-- "branches": 条件分岐（if文など、どのような場合分けが必要か。不要な場合は「特になし」とする）
-- "steps": 考える手順（コードを書くためのロジックの順番を分かりやすく箇条書きで）
-- "hints": ヒント（使うと便利な組み込み関数や概念、よくある間違いの注意点など）
-`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-          systemInstruction: systemInstruction,
-          responseMimeType: "application/json",
-        }
-      });
-
-      const text = response.text;
-      if (!text) {
-        throw new Error("AIから空の応答が返されました");
-      }
-
-      const cleanedText = text.replace(/```(?:json)?\n?/g, "").replace(/```/g, "").trim();
-      const data = JSON.parse(cleanedText);
+      // Brief artificial delay so the loading spinner is visible
+      await new Promise((r) => setTimeout(r, 400));
+      const data = analyzeLocalProblem(prompt);
       setResult(data);
-      // 初期のコードエディタに初期テンプレートを配置
       setUserCode("# ここにコードを書いてみましょう\n\n");
-    } catch (err: any) {
-      setError(err.message || "予期せぬエラーが発生しました");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "予期せぬエラーが発生しました");
     } finally {
       setLoading(false);
     }
   };
 
-  // コードレビューのリクエスト
   const handleReview = async () => {
     if (!userCode.trim() || reviewLoading) return;
 
@@ -147,59 +65,16 @@ export default function Home() {
     setReviewResult(null);
 
     try {
-      const ai = getAiClient();
-      const systemInstruction = `あなたはPython初学者のための「思考補助AI」です。
-ユーザーから「Pythonの課題文」と「ユーザーが書いたPythonコード」が与えられます。
-コードを検証し、以下の制約を厳守してレビュー結果をJSON形式で返してください。
-
-【絶対の制約】
-1. 正しい完成コード（答え）は絶対に提示しないこと。
-2. エラーがある場合や要件を満たしていない場合も、直接答えを教えるのではなく、何が間違っているか、どう修正すべきかの「気づきを与えるヒントや問いかけ」を行ってください。
-3. 初学者を優しく励ますトーンで丁寧に説明すること。
-4. 必ずJSON形式で出力し、指定されたキーのみを含むこと。
-
-【出力JSONのキーと内容】
-- "status": 判定結果。以下のいずれかを選択。
-  - "correct": コードが完全に課題の要件を満たしており、エラーもない。
-  - "needs_improvement": 課題の要件は一部満たしている、または動作はするが、論理的な誤りや改善の余地がある。
-  - "error": 構文エラー（SyntaxError）がある、または実行時に致命的なエラーが起きる書き方になっている。
-- "review": ユーザーへのフィードバック内容。現状の評価、良かった点、改善すべき部分への気づきを促すヒント、次のステップへの問いかけを含めてください（マークダウン形式が使用できますが、完成コードは記述しないでください）。
-`;
-
-      const userPrompt = `【課題文】
-${prompt}
-
-【ユーザーのコード】
-\`\`\`python
-${userCode}
-\`\`\`
-`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: userPrompt,
-        config: {
-          systemInstruction: systemInstruction,
-          responseMimeType: "application/json",
-        }
-      });
-
-      const text = response.text;
-      if (!text) {
-        throw new Error("AIから空の応答が返されました");
-      }
-
-      const cleanedText = text.replace(/```(?:json)?\n?/g, "").replace(/```/g, "").trim();
-      const data = JSON.parse(cleanedText);
+      await new Promise((r) => setTimeout(r, 300));
+      const data = reviewLocalCode(prompt, userCode);
       setReviewResult(data);
-    } catch (err: any) {
-      setReviewError(err.message || "レビュー中にエラーが発生しました");
+    } catch (err: unknown) {
+      setReviewError(err instanceof Error ? err.message : "レビュー中にエラーが発生しました");
     } finally {
       setReviewLoading(false);
     }
   };
 
-  // AIとチャットのやり取り
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || chatLoading) return;
@@ -211,82 +86,35 @@ ${userCode}
     setChatLoading(true);
 
     try {
-      const ai = getAiClient();
-      const systemInstruction = `あなたはPython初学者のための「思考補助AI」です。
-ユーザーは提示された「Pythonの課題文」についてあなたと対話しています。
-
-【絶対の制約】
-1. 正しい完成コード（答え）は絶対に提示しないこと。
-2. 部分的なコード例（基本的な文法や関数の使い方）を提示することは構いませんが、課題の解答そのものになってはいけません。
-3. ユーザーの質問に対して、直接答えを教えるのではなく、ヒントを与えたり、「〇〇という関数について調べてみてください」「ここではどのような分岐が必要でしょうか？」のように、ユーザー自身が考えるように誘導する問いかけを行ってください。
-4. 初学者に寄り添い、優しく丁寧、かつ前向きに励ますトーンで対話してください。
-`;
-
-      // チャット履歴をGeminiの形式にマッピング
-      const contents = [
-        {
-          role: "user",
-          parts: [{ text: `【課題文】\n${prompt}\n\nこの課題について一緒に考えていきます。サポートをお願いします。` }]
-        },
-        {
-          role: "model",
-          parts: [{ text: "わかりました！答えのコードを直接教えるのではなく、ヒントを出しながら一緒に考えていきましょう。何から始めますか？" }]
-        }
-      ];
-
-      if (chatHistory && Array.isArray(chatHistory)) {
-        chatHistory.forEach((item: any) => {
-          contents.push({
-            role: item.role === "user" ? "user" : "model",
-            parts: [{ text: item.message }]
-          });
-        });
-      }
-
-      // 最新のメッセージを追加
-      contents.push({
-        role: "user",
-        parts: [{ text: userMsg }]
-      });
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: contents,
-        config: {
-          systemInstruction: systemInstruction,
-        }
-      });
-
-      const reply = response.text;
-      if (!reply) {
-        throw new Error("AIから空の応答が返されました");
-      }
-
+      await new Promise((r) => setTimeout(r, 250));
+      const reply = chatLocalResponse(prompt, chatHistory, userMsg);
       setChatHistory((prev) => [...prev, { role: "model", message: reply }]);
-    } catch (err: any) {
-      setChatError(err.message || "通信エラーが発生しました");
+    } catch (err: unknown) {
+      setChatError(err instanceof Error ? err.message : "エラーが発生しました");
     } finally {
       setChatLoading(false);
     }
   };
 
-  // 簡易マークダウンパーサー
   const renderMarkdown = (text: string) => {
     if (!text) return null;
     return text.split("\n").map((line, i) => {
       if (line.startsWith("```")) {
         return null;
       }
-      // 太字 **text**
       const boldRegex = /\*\*(.*?)\*\*/g;
-      const parts = [];
+      const parts: React.ReactNode[] = [];
       let lastIndex = 0;
       let match;
       while ((match = boldRegex.exec(line)) !== null) {
         if (match.index > lastIndex) {
           parts.push(line.substring(lastIndex, match.index));
         }
-        parts.push(<strong key={match.index} className="text-yellow-400 font-bold">{match[1]}</strong>);
+        parts.push(
+          <strong key={match.index} className="text-yellow-400 font-bold">
+            {match[1]}
+          </strong>
+        );
         lastIndex = boldRegex.lastIndex;
       }
       if (lastIndex < line.length) {
@@ -303,16 +131,7 @@ ${userCode}
   return (
     <main className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto flex flex-col gap-6">
       {/* ヘッダー */}
-      <header className="relative text-center space-y-3 py-4 border-b border-surface-border/50">
-        <div className="absolute right-0 top-0">
-          <button
-            onClick={() => setShowSettings(true)}
-            className="p-2 hover:bg-surface-border/40 rounded-full transition-all text-gray-400 hover:text-gray-200 cursor-pointer"
-            title="APIキー設定"
-          >
-            <Settings className="w-5 h-5" />
-          </button>
-        </div>
+      <header className="text-center space-y-3 py-4 border-b border-surface-border/50">
         <div className="inline-flex items-center gap-2 bg-primary/10 border border-primary/20 px-3 py-1 rounded-full text-xs font-semibold text-primary">
           <Sparkles className="w-3.5 h-3.5" />
           Prototype v2
@@ -325,24 +144,6 @@ ${userCode}
           答えのコードではなく、自力で解くための「思考の手順」を段階的にガイドし、書いたコードのフィードバックを行います。
         </p>
       </header>
-
-      {/* APIキー未設定時の警告 */}
-      {!apiKey && (
-        <div className="bg-yellow-950/20 border border-yellow-900/50 text-yellow-300 p-4 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-3 max-w-3xl mx-auto w-full">
-          <div className="flex items-center gap-3">
-            <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0" />
-            <p className="text-sm">
-              Gemini APIキーが設定されていません。アプリを使用するにはAPIキーの設定が必要です。
-            </p>
-          </div>
-          <button
-            onClick={() => setShowSettings(true)}
-            className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-gray-950 text-xs font-bold rounded-lg transition-colors flex-shrink-0 cursor-pointer"
-          >
-            APIキーを設定する
-          </button>
-        </div>
-      )}
 
       {/* 課題入力フォーム */}
       {!result && (
@@ -393,12 +194,12 @@ ${userCode}
       {/* メインエリア：解析後の2カラムレイアウト */}
       {result && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-in fade-in duration-500 ease-out">
-          
+
           {/* 左カラム：思考のステップ（段階的UI） */}
           <div className="lg:col-span-5 flex flex-col gap-4">
             <div className="flex justify-between items-center bg-surface/50 border border-surface-border p-4 rounded-xl">
               <span className="text-xs text-gray-400 font-medium">課題</span>
-              <button 
+              <button
                 onClick={() => {
                   setResult(null);
                   setPrompt("");
@@ -424,7 +225,6 @@ ${userCode}
                 思考を組み立てよう
               </h2>
 
-              {/* ステップ1: 問題 of 目的 */}
               <StepCard
                 stepNumber={1}
                 title="問題の目的を確認する"
@@ -436,7 +236,7 @@ ${userCode}
                   {result.purpose}
                 </p>
                 {currentStep === 1 && (
-                  <button 
+                  <button
                     onClick={() => setCurrentStep(2)}
                     className="mt-3 w-full py-2 bg-gray-800 hover:bg-gray-700 text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-colors text-blue-300"
                   >
@@ -445,7 +245,6 @@ ${userCode}
                 )}
               </StepCard>
 
-              {/* ステップ2: 入力値と条件 */}
               <StepCard
                 stepNumber={2}
                 title="必要なデータと条件分岐"
@@ -469,7 +268,7 @@ ${userCode}
                   </div>
                 </div>
                 {currentStep === 2 && (
-                  <button 
+                  <button
                     onClick={() => setCurrentStep(3)}
                     className="mt-3 w-full py-2 bg-gray-800 hover:bg-gray-700 text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-colors text-purple-300"
                   >
@@ -478,7 +277,6 @@ ${userCode}
                 )}
               </StepCard>
 
-              {/* ステップ3: 考える手順 */}
               <StepCard
                 stepNumber={3}
                 title="コードの設計（手順）"
@@ -490,7 +288,7 @@ ${userCode}
                   {result.steps}
                 </p>
                 {currentStep === 3 && (
-                  <button 
+                  <button
                     onClick={() => setCurrentStep(4)}
                     className="mt-3 w-full py-2 bg-gray-800 hover:bg-gray-700 text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-colors text-orange-300"
                   >
@@ -499,7 +297,6 @@ ${userCode}
                 )}
               </StepCard>
 
-              {/* ステップ4: ヒント・実装 */}
               <StepCard
                 stepNumber={4}
                 title="実装のヒント"
@@ -519,7 +316,7 @@ ${userCode}
 
           {/* 右カラム：実践とサポート（エディタ ＆ チャット） */}
           <div className="lg:col-span-7 flex flex-col min-h-[550px] bg-surface rounded-2xl border border-surface-border overflow-hidden shadow-xl">
-            
+
             {/* タブヘッダー */}
             <div className="flex border-b border-surface-border bg-gray-900/40">
               <button
@@ -548,7 +345,7 @@ ${userCode}
 
             {/* タブコンテンツ */}
             <div className="flex-1 flex flex-col p-6 min-h-[450px]">
-              
+
               {/* === タブ1: コードエディタと検証 === */}
               {activeTab === "editor" && (
                 <div className="flex-1 flex flex-col gap-4 animate-in fade-in duration-200">
@@ -562,9 +359,7 @@ ${userCode}
                     </span>
                   </div>
 
-                  {/* 簡易テキストエリアエディタ */}
                   <div className="relative flex-1 min-h-[220px] bg-gray-950 rounded-xl border border-surface-border/80 overflow-hidden flex font-mono text-sm">
-                    {/* 行番号デザイン */}
                     <div className="bg-gray-900/50 text-gray-600 px-3 py-4 text-right select-none border-r border-surface-border/40 text-xs flex flex-col gap-1 min-w-[2.5rem]">
                       {Array.from({ length: Math.max(10, userCode.split("\n").length) }).map((_, i) => (
                         <div key={i}>{i + 1}</div>
@@ -579,7 +374,6 @@ ${userCode}
                     />
                   </div>
 
-                  {/* レビューエラー */}
                   {reviewError && (
                     <div className="bg-red-950/20 border border-red-900/50 text-red-300 p-3.5 rounded-lg flex items-center gap-2.5 text-xs">
                       <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -587,7 +381,6 @@ ${userCode}
                     </div>
                   )}
 
-                  {/* アクションボタン */}
                   <div className="flex justify-end">
                     <button
                       onClick={handleReview}
@@ -608,15 +401,16 @@ ${userCode}
                     </button>
                   </div>
 
-                  {/* レビュー結果表示 */}
                   {reviewResult && (
-                    <div className={`mt-2 p-5 rounded-xl border animate-in fade-in slide-in-from-bottom-2 duration-300 ${
-                      reviewResult.status === "correct" 
-                        ? "bg-green-950/15 border-green-800/60 text-green-100" 
-                        : reviewResult.status === "needs_improvement"
-                        ? "bg-yellow-950/15 border-yellow-800/50 text-yellow-100"
-                        : "bg-red-950/15 border-red-800/60 text-red-100"
-                    }`}>
+                    <div
+                      className={`mt-2 p-5 rounded-xl border animate-in fade-in slide-in-from-bottom-2 duration-300 ${
+                        reviewResult.status === "correct"
+                          ? "bg-green-950/15 border-green-800/60 text-green-100"
+                          : reviewResult.status === "needs_improvement"
+                          ? "bg-yellow-950/15 border-yellow-800/50 text-yellow-100"
+                          : "bg-red-950/15 border-red-800/60 text-red-100"
+                      }`}
+                    >
                       <div className="flex items-center gap-2.5 mb-3">
                         {reviewResult.status === "correct" ? (
                           <div className="w-6 h-6 rounded-full bg-green-500/20 border border-green-500/40 flex items-center justify-center">
@@ -632,11 +426,12 @@ ${userCode}
                           </div>
                         )}
                         <h4 className="font-bold text-sm">
-                          判定: {
-                            reviewResult.status === "correct" ? "正しく作れています！" :
-                            reviewResult.status === "needs_improvement" ? "惜しい！あと少しです" :
-                            "エラーがある、または要件を満たしていません"
-                          }
+                          判定:{" "}
+                          {reviewResult.status === "correct"
+                            ? "正しく作れています！"
+                            : reviewResult.status === "needs_improvement"
+                            ? "惜しい！あと少しです"
+                            : "エラーがある、または要件を満たしていません"}
                         </h4>
                       </div>
                       <div className="text-sm leading-relaxed space-y-1 pl-1 text-gray-300">
@@ -650,10 +445,7 @@ ${userCode}
               {/* === タブ2: チャット対話機能 === */}
               {activeTab === "chat" && (
                 <div className="flex-1 flex flex-col gap-4 animate-in fade-in duration-200 overflow-hidden">
-                  
-                  {/* 対話メッセージ領域 */}
                   <div className="flex-1 bg-gray-950/40 rounded-xl border border-surface-border/50 p-4 overflow-y-auto max-h-[350px] flex flex-col gap-4">
-                    {/* 初期ウェルカムメッセージ */}
                     <div className="flex gap-3 max-w-[85%] self-start">
                       <div className="w-7 h-7 rounded-full bg-indigo-900/50 border border-indigo-700/50 flex items-center justify-center flex-shrink-0 text-xs">
                         🤖
@@ -665,24 +457,27 @@ ${userCode}
                       </div>
                     </div>
 
-                    {/* 対話ログのループ */}
                     {chatHistory.map((item, idx) => (
-                      <div 
-                        key={idx} 
+                      <div
+                        key={idx}
                         className={`flex gap-3 max-w-[85%] ${item.role === "user" ? "self-end flex-row-reverse" : "self-start"}`}
                       >
-                        <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs ${
-                          item.role === "user" 
-                            ? "bg-primary/20 border border-primary/40 text-primary" 
-                            : "bg-indigo-900/50 border border-indigo-700/50"
-                        }`}>
+                        <div
+                          className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs ${
+                            item.role === "user"
+                              ? "bg-primary/20 border border-primary/40 text-primary"
+                              : "bg-indigo-900/50 border border-indigo-700/50"
+                          }`}
+                        >
                           {item.role === "user" ? "👤" : "🤖"}
                         </div>
-                        <div className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm ${
-                          item.role === "user"
-                            ? "bg-primary hover:bg-primary-hover text-white rounded-tr-none font-medium"
-                            : "bg-surface border border-surface-border/60 text-gray-300 rounded-tl-none"
-                        }`}>
+                        <div
+                          className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm ${
+                            item.role === "user"
+                              ? "bg-primary hover:bg-primary-hover text-white rounded-tr-none font-medium"
+                              : "bg-surface border border-surface-border/60 text-gray-300 rounded-tl-none"
+                          }`}
+                        >
                           {item.role === "user" ? (
                             <p className="whitespace-pre-wrap">{item.message}</p>
                           ) : (
@@ -692,7 +487,6 @@ ${userCode}
                       </div>
                     ))}
 
-                    {/* 送信中ローダー */}
                     {chatLoading && (
                       <div className="flex gap-3 max-w-[85%] self-start">
                         <div className="w-7 h-7 rounded-full bg-indigo-900/50 border border-indigo-700/50 flex items-center justify-center flex-shrink-0 text-xs animate-pulse">
@@ -704,11 +498,10 @@ ${userCode}
                         </div>
                       </div>
                     )}
-                    
+
                     <div ref={chatEndRef} />
                   </div>
 
-                  {/* チャットエラー */}
                   {chatError && (
                     <div className="bg-red-950/20 border border-red-900/50 text-red-300 p-3 rounded-lg flex items-center gap-2 text-xs">
                       <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -716,7 +509,6 @@ ${userCode}
                     </div>
                   )}
 
-                  {/* 送信フォーム */}
                   <form onSubmit={handleSendMessage} className="flex gap-2">
                     <input
                       type="text"
@@ -736,70 +528,6 @@ ${userCode}
                   </form>
                 </div>
               )}
-
-            </div>
-          </div>
-
-        </div>
-      )}
-
-      {/* APIキー設定用モーダル */}
-      {showSettings && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-surface max-w-md w-full rounded-2xl border border-surface-border p-6 shadow-2xl space-y-4 relative text-left">
-            <button
-              onClick={() => {
-                setTempApiKey(apiKey);
-                setShowSettings(false);
-              }}
-              className="absolute right-4 top-4 text-gray-400 hover:text-gray-200 p-1 hover:bg-surface-border/40 rounded-full transition-all cursor-pointer"
-            >
-              <X className="w-5 h-5" />
-            </button>
-            
-            <h3 className="text-lg font-bold text-gray-100 flex items-center gap-2">
-              <Settings className="w-5 h-5 text-primary" />
-              APIキー設定
-            </h3>
-            
-            <p className="text-xs text-gray-400 leading-relaxed">
-              本アプリケーションはブラウザ上で直接 Gemini API を呼び出します。
-              入力されたAPIキーはブラウザのLocalStorageにのみ保存され、サーバー等に送信されることはありません。
-            </p>
-            
-            <div className="space-y-2 text-left">
-              <label htmlFor="modal-api-key" className="text-sm font-medium text-gray-300 block">
-                Gemini API キー (API Key)
-              </label>
-              <input
-                id="modal-api-key"
-                type="password"
-                value={tempApiKey}
-                onChange={(e) => setTempApiKey(e.target.value)}
-                placeholder="AIzaSy..."
-                className="w-full px-3 py-2 bg-gray-950 border border-surface-border rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent outline-none text-sm font-mono text-gray-200"
-              />
-              <p className="text-[10px] text-gray-500">
-                ※無料のAPIキーは <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Google AI Studio</a> から取得できます。
-              </p>
-            </div>
-            
-            <div className="flex gap-2 justify-end pt-2">
-              <button
-                onClick={() => {
-                  setTempApiKey(apiKey);
-                  setShowSettings(false);
-                }}
-                className="px-4 py-2 text-xs font-semibold text-gray-400 hover:text-gray-200 transition-colors cursor-pointer"
-              >
-                キャンセル
-              </button>
-              <button
-                onClick={() => handleSaveApiKey(tempApiKey)}
-                className="px-4 py-2 bg-primary hover:bg-primary-hover text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                保存する
-              </button>
             </div>
           </div>
         </div>
@@ -823,16 +551,15 @@ function StepCard({ stepNumber, title, icon, activeStep, onSelect, children }: S
   const isCurrent = activeStep === stepNumber;
 
   return (
-    <div 
+    <div
       className={`transition-all duration-300 rounded-xl overflow-hidden border ${
-        isCurrent 
-          ? "border-primary bg-primary/5 shadow-md shadow-primary/5" 
-          : isOpen 
-          ? "border-surface-border bg-surface/40" 
+        isCurrent
+          ? "border-primary bg-primary/5 shadow-md shadow-primary/5"
+          : isOpen
+          ? "border-surface-border bg-surface/40"
           : "border-surface-border/30 bg-surface/10 opacity-50"
       }`}
     >
-      {/* カードヘッダー */}
       <button
         onClick={() => {
           if (activeStep >= stepNumber) {
@@ -845,20 +572,24 @@ function StepCard({ stepNumber, title, icon, activeStep, onSelect, children }: S
         }`}
       >
         <div className="flex items-center gap-3">
-          <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${
-            isCurrent
-              ? "bg-primary text-white"
-              : isOpen
-              ? "bg-surface-border text-gray-300 border border-surface-border"
-              : "bg-transparent text-gray-600 border border-surface-border/20"
-          }`}>
+          <div
+            className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${
+              isCurrent
+                ? "bg-primary text-white"
+                : isOpen
+                ? "bg-surface-border text-gray-300 border border-surface-border"
+                : "bg-transparent text-gray-600 border border-surface-border/20"
+            }`}
+          >
             {stepNumber}
           </div>
           <div className="flex items-center gap-2">
             {icon}
-            <span className={`font-semibold text-sm md:text-base ${
-              isCurrent ? "text-primary" : isOpen ? "text-gray-200" : "text-gray-500"
-            }`}>
+            <span
+              className={`font-semibold text-sm md:text-base ${
+                isCurrent ? "text-primary" : isOpen ? "text-gray-200" : "text-gray-500"
+              }`}
+            >
               {title}
             </span>
           </div>
@@ -870,12 +601,9 @@ function StepCard({ stepNumber, title, icon, activeStep, onSelect, children }: S
         )}
       </button>
 
-      {/* カードボディ */}
       {isOpen && isCurrent && (
         <div className="px-4 pb-4 pt-1 animate-in fade-in slide-in-from-top-1 duration-200">
-          <div className="pl-11 border-l-2 border-surface-border/50 ml-4 py-2">
-            {children}
-          </div>
+          <div className="pl-11 border-l-2 border-surface-border/50 ml-4 py-2">{children}</div>
         </div>
       )}
     </div>
